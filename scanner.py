@@ -1,6 +1,6 @@
 import ccxt
 import pandas as pd
-import pandas_ta as ta
+import ta
 from backtest import run_backtest
 
 exchange = ccxt.binance()
@@ -26,10 +26,10 @@ def get_candles(symbol, timeframe, limit=200):
         return None
 
 def calculate_indicators(df):
-    df['ema20'] = ta.ema(df['close'], length=20)
-    df['ema50'] = ta.ema(df['close'], length=50)
-    df['rsi'] = ta.rsi(df['close'], length=14)
-    df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+    df['ema20'] = ta.trend.ema_indicator(df['close'], window=20)
+    df['ema50'] = ta.trend.ema_indicator(df['close'], window=50)
+    df['rsi'] = ta.momentum.rsi(df['close'], window=14)
+    df['atr'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=14)
     return df
 
 def find_signal(symbol, timeframe):

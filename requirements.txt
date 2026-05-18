@@ -3,7 +3,7 @@ requests
 python-dotenv
 ccxt
 pandas
-pandas-ta
+ta
 mplfinance
 matplotlib
 Pillow
