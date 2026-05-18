@@ -1,0 +1,10 @@
+python-telegram-bot==20.7
+requests
+python-dotenv
+ccxt
+pandas
+pandas-ta
+mplfinance
+matplotlib
+Pillow
+flask
