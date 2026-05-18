@@ -1,29 +1,28 @@
-from keep_alive import keep_alive
-keep_alive()
 import ccxt
 import asyncio
 import pandas as pd
 import mplfinance as mpf
 import matplotlib.pyplot as plt
 from telegram import Bot
+from telegram.request import HTTPXRequest
 from dotenv import load_dotenv
 from scanner import scan_all
+from keep_alive import keep_alive
 import os
 import io
-from telegram.request import HTTPXRequest
 
-# Збільшуємо пул з'єднань
+load_dotenv()
+keep_alive()
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+
 request = HTTPXRequest(
     connection_pool_size=20,
     read_timeout=30,
     write_timeout=30,
     connect_timeout=30,
 )
-
-load_dotenv()
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
 
 exchange = ccxt.binance()
 
@@ -48,9 +47,9 @@ def get_price(symbol):
     ticker = exchange.fetch_ticker(symbol)
     return ticker['last']
 
-def generate_chart(symbol, timeframe, direction, entry, dobar_low, dobar_high, tps, hit_tps=[]):
+def generate_chart(symbol, timeframe, direction, entry, dobar_low, dobar_high, tps, hit_tps=[], stop_loss=None):
     ccxt_symbol = symbol[:-4] + '/USDT' if symbol.endswith('USDT') else symbol
-    df = get_candles(ccxt_symbol, timeframe, limit=40)
+    df = get_candles(ccxt_symbol, timeframe)
 
     bg_color = '#f28b82' if direction == 'SHORT' else '#90c97a'
     up_color = '#2d7a2d'
@@ -71,6 +70,10 @@ def generate_chart(symbol, timeframe, direction, entry, dobar_low, dobar_high, t
 
     hlines = [entry] + [tp[0] for tp in tps]
     hline_colors = ['#1a6dcc'] + ['#1a1a1a'] * len(tps)
+
+    if stop_loss:
+        hlines.append(stop_loss)
+        hline_colors.append('#e74c3c')
 
     fig, ax = mpf.plot(
         df, type='candle', style=style,
@@ -104,17 +107,16 @@ def generate_chart(symbol, timeframe, direction, entry, dobar_low, dobar_high, t
         color='white',
         bbox=dict(boxstyle='round,pad=0.2', facecolor=dobar_color, edgecolor='none', alpha=0.8)
     )
+
     # Підписи рівнів добору
     ax.text(
-        1.01, dobar_low,
-        f'{dobar_low}',
+        1.01, dobar_low, f'{dobar_low}',
         transform=ax.get_yaxis_transform(),
         fontsize=8, va='center', color='white',
         bbox=dict(boxstyle='round,pad=0.2', facecolor=dobar_color, edgecolor='none', alpha=0.8)
     )
     ax.text(
-        1.01, dobar_high,
-        f'{dobar_high}',
+        1.01, dobar_high, f'{dobar_high}',
         transform=ax.get_yaxis_transform(),
         fontsize=8, va='center', color='white',
         bbox=dict(boxstyle='round,pad=0.2', facecolor=dobar_color, edgecolor='none', alpha=0.8)
@@ -140,6 +142,15 @@ def generate_chart(symbol, timeframe, direction, entry, dobar_low, dobar_high, t
         fontsize=9, va='center', color='white',
         bbox=dict(boxstyle='round,pad=0.3', facecolor='#1a6dcc', edgecolor='none')
     )
+
+    # Стоп-лосс підпис
+    if stop_loss:
+        ax.text(
+            1.01, stop_loss, f'SL  {stop_loss}',
+            transform=ax.get_yaxis_transform(),
+            fontsize=9, va='center', color='white',
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='#e74c3c', edgecolor='none')
+        )
 
     # TP підписи
     tp_labels = ['TP1', 'TP2', 'TP3', 'TP4']
@@ -189,8 +200,7 @@ def generate_chart(symbol, timeframe, direction, entry, dobar_low, dobar_high, t
     buf.seek(0)
     return buf
 
-def format_signal(symbol, timeframe, direction, entry, dobar_low, dobar_high, tps, stats, hit_tps=[]):
-    tier = "🟢"
+def format_signal(symbol, timeframe, direction, entry, dobar_low, dobar_high, tps, stats, hit_tps=[], tier='🟢', stop_loss=None):
     dir_emoji = "📈" if direction == "LONG" else "📉"
     lines = []
     lines.append(f"#{symbol} {timeframe} {tier}")
@@ -198,6 +208,8 @@ def format_signal(symbol, timeframe, direction, entry, dobar_low, dobar_high, tp
     lines.append(f"")
     lines.append(f"👉 ENTRY : {entry}")
     lines.append(f"👉 ДОБОР : {dobar_low} — {dobar_high}")
+    if stop_loss:
+        lines.append(f"🛑 СТОП : {stop_loss}")
     lines.append(f"")
 
     tp_labels = ['TP1', 'TP2', 'TP3', 'TP4']
@@ -247,13 +259,16 @@ async def monitor_signal(bot, signal):
             new_text = format_signal(
                 symbol, signal['timeframe'], direction,
                 signal['entry'], signal['dobar_low'], signal['dobar_high'],
-                tps, signal['stats'], hit_tps
+                tps, signal['stats'], hit_tps,
+                tier=signal.get('tier', '🟢'),
+                stop_loss=signal.get('stop_loss')
             )
 
             new_chart = generate_chart(
                 symbol, signal['timeframe'], direction,
                 signal['entry'], signal['dobar_low'], signal['dobar_high'],
-                tps, list(hit_tps)
+                tps, list(hit_tps),
+                stop_loss=signal.get('stop_loss')
             )
 
             try:
@@ -297,14 +312,17 @@ async def scan_and_send(bot, active_signals, timeframes):
                     signal['symbol'], signal['timeframe'],
                     signal['direction'], signal['entry'],
                     signal['dobar_low'], signal['dobar_high'],
-                    signal['tps'], signal['stats']
+                    signal['tps'], signal['stats'],
+                    tier=signal.get('tier', '🟢'),
+                    stop_loss=signal.get('stop_loss')
                 )
 
                 chart = generate_chart(
                     signal['symbol'], signal['timeframe'],
                     signal['direction'], signal['entry'],
                     signal['dobar_low'], signal['dobar_high'],
-                    signal['tps']
+                    signal['tps'],
+                    stop_loss=signal.get('stop_loss')
                 )
 
                 sent = await bot.send_photo(

@@ -8,13 +8,13 @@ exchange = ccxt.binance()
 WATCHLIST = [
     'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT',
     'XRP/USDT', 'DOGE/USDT', 'ADA/USDT', 'AVAX/USDT',
-    'DOT/USDT', 'MATIC/USDT', 'LINK/USDT', 'UNI/USDT',
+    'DOT/USDT', 'POL/USDT', 'LINK/USDT', 'UNI/USDT',
     'ATOM/USDT', 'LTC/USDT', 'ETC/USDT', 'FIL/USDT',
 ]
 
 TIMEFRAMES = ['5m', '15m', '1h', '4h', '1d']
 
-def get_candles(symbol, timeframe, limit=200):
+def get_candles(symbol, timeframe, limit=1000):
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -33,14 +33,22 @@ def calculate_indicators(df):
     return df
 
 def find_signal(symbol, timeframe):
-    df = get_candles(symbol, timeframe, limit=200)
+    df = get_candles(symbol, timeframe, limit=1000)
     if df is None or len(df) < 60:
         return None
 
     df = calculate_indicators(df)
+    df = df.dropna()
 
-    last = df.iloc[-1]
-    price = last['close']
+    if len(df) < 3:
+        return None
+
+    # Остання закрита свічка для індикаторів
+    last = df.iloc[-2]
+    # Поточна свічка для ціни входу
+    current = df.iloc[-1]
+
+    price = current['close']
     rsi = last['rsi']
     ema20 = last['ema20']
     ema50 = last['ema50']
@@ -51,14 +59,14 @@ def find_signal(symbol, timeframe):
 
     direction = None
 
-    if (price < ema20 and
-        price < ema50 and
+    if (last['close'] < ema20 and
+        last['close'] < ema50 and
         45 < rsi < 60 and
         last['close'] < last['open']):
         direction = 'SHORT'
 
-    elif (price > ema20 and
-          price > ema50 and
+    elif (last['close'] > ema20 and
+          last['close'] > ema50 and
           40 < rsi < 55 and
           last['close'] > last['open']):
         direction = 'LONG'
@@ -69,8 +77,10 @@ def find_signal(symbol, timeframe):
     entry = round(price, 6)
 
     if direction == 'SHORT':
-        dobar_low = round(entry * 1.005, 6)
-        dobar_high = round(entry * 1.015, 6)
+        # Добір через ATR
+        dobar_low = round(entry + atr * 0.5, 6)
+        dobar_high = round(entry + atr * 1.5, 6)
+        stop_loss = round(entry + atr * 2.0, 6)
         tps = [
             (round(entry - atr * 0.8, 6), 90, round(atr * 0.8 / entry * 100, 1)),
             (round(entry - atr * 1.3, 6), 75, round(atr * 1.3 / entry * 100, 1)),
@@ -78,8 +88,10 @@ def find_signal(symbol, timeframe):
             (round(entry - atr * 3.0, 6), 40, round(atr * 3.0 / entry * 100, 1)),
         ]
     else:
-        dobar_low = round(entry * 0.985, 6)
-        dobar_high = round(entry * 0.995, 6)
+        # Добір через ATR
+        dobar_low = round(entry - atr * 1.5, 6)
+        dobar_high = round(entry - atr * 0.5, 6)
+        stop_loss = round(entry - atr * 2.0, 6)
         tps = [
             (round(entry + atr * 0.8, 6), 90, round(atr * 0.8 / entry * 100, 1)),
             (round(entry + atr * 1.3, 6), 75, round(atr * 1.3 / entry * 100, 1)),
@@ -87,8 +99,8 @@ def find_signal(symbol, timeframe):
             (round(entry + atr * 3.0, 6), 40, round(atr * 3.0 / entry * 100, 1)),
         ]
 
-    # Бектест
-    stats = run_backtest(symbol.replace('/', ''), timeframe, direction)
+    # Бектест — передаємо вже готовий df
+    stats = run_backtest(df, direction)
 
     # Оновлюємо ймовірності TP з бектесту
     if stats['count'] > 0:
@@ -97,6 +109,15 @@ def find_signal(symbol, timeframe):
             prob = stats['tp_probs'][i] if i < len(stats['tp_probs']) else 40
             tps_with_probs.append((tp_price, prob, pct))
         tps = tps_with_probs
+
+    # Визначаємо Tier
+    tp1_prob = stats['tp_probs'][0] if stats['count'] > 0 else 50
+    if tp1_prob >= 70:
+        tier = '🟢'
+    elif tp1_prob >= 50:
+        tier = '🟡'
+    else:
+        tier = '🔵'
 
     return {
         'symbol': symbol.replace('/', ''),
@@ -107,6 +128,8 @@ def find_signal(symbol, timeframe):
         'dobar_high': dobar_high,
         'tps': tps,
         'stats': stats,
+        'tier': tier,
+        'stop_loss': stop_loss,
     }
 
 def scan_all(timeframes=None):
