@@ -11,6 +11,9 @@ from keep_alive import keep_alive
 from stats import add_signal, close_signal, get_summary, clear_stats
 import os
 import io
+import sys
+# Вимикаємо буферизацію виводу
+sys.stdout.reconfigure(line_buffering=True)
 
 load_dotenv()
 keep_alive()
