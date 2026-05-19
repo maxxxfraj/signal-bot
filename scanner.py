@@ -29,7 +29,9 @@ def calculate_indicators(df):
     df['ema20'] = ta.trend.ema_indicator(df['close'], window=20)
     df['ema50'] = ta.trend.ema_indicator(df['close'], window=50)
     df['rsi'] = ta.momentum.rsi(df['close'], window=14)
-    df['atr'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=14)
+    df['atr'] = ta.volatility.average_true_range(
+        df['high'], df['low'], df['close'], window=14
+    )
     return df
 
 def find_signal(symbol, timeframe):
@@ -77,7 +79,6 @@ def find_signal(symbol, timeframe):
     entry = round(price, 6)
 
     if direction == 'SHORT':
-        # Добір через ATR
         dobar_low = round(entry + atr * 0.5, 6)
         dobar_high = round(entry + atr * 1.5, 6)
         stop_loss = round(entry + atr * 2.0, 6)
@@ -88,7 +89,6 @@ def find_signal(symbol, timeframe):
             (round(entry - atr * 3.0, 6), 40, round(atr * 3.0 / entry * 100, 1)),
         ]
     else:
-        # Добір через ATR
         dobar_low = round(entry - atr * 1.5, 6)
         dobar_high = round(entry - atr * 0.5, 6)
         stop_loss = round(entry - atr * 2.0, 6)
@@ -101,6 +101,11 @@ def find_signal(symbol, timeframe):
 
     # Бектест — передаємо вже готовий df
     stats = run_backtest(df, direction)
+
+    # Фільтр слабких стратегій
+    if not stats.get('is_valid', False):
+        print(f"⛔ {symbol} {timeframe} {direction} — слабка стратегія, пропускаємо")
+        return None
 
     # Оновлюємо ймовірності TP з бектесту
     if stats['count'] > 0:

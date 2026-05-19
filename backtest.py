@@ -5,7 +5,9 @@ def calculate_indicators(df):
     df['ema20'] = ta.trend.ema_indicator(df['close'], window=20)
     df['ema50'] = ta.trend.ema_indicator(df['close'], window=50)
     df['rsi'] = ta.momentum.rsi(df['close'], window=14)
-    df['atr'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=14)
+    df['atr'] = ta.volatility.average_true_range(
+        df['high'], df['low'], df['close'], window=14
+    )
     return df
 
 def run_backtest(df, direction):
@@ -127,6 +129,7 @@ def run_backtest(df, direction):
             'avg_dev': avg_dev,
             'deviations': deviations,
             'tp_probs': [tp1_prob, tp2_prob, tp3_prob, tp4_prob],
+            'is_valid': total >= 15 and tp1_prob >= 60,
         }
 
     except Exception as e:
@@ -139,4 +142,5 @@ def default_stats():
         'avg_dev': 0.0,
         'deviations': {},
         'tp_probs': [90, 75, 58, 40],
+        'is_valid': False,
     }

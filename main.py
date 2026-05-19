@@ -8,6 +8,7 @@ from telegram.request import HTTPXRequest
 from dotenv import load_dotenv
 from scanner import scan_all
 from keep_alive import keep_alive
+from stats import add_signal, close_signal, get_summary, clear_stats
 import os
 import io
 
@@ -47,7 +48,7 @@ def get_price(symbol):
     ticker = exchange.fetch_ticker(symbol)
     return ticker['last']
 
-def generate_chart(symbol, timeframe, direction, entry, dobar_low, dobar_high, tps, hit_tps=[], stop_loss=None):
+def generate_chart(symbol, timeframe, direction, entry, dobar_low, dobar_high, tps, hit_tps=[], stop_loss=None, show_dobar=True):
     ccxt_symbol = symbol[:-4] + '/USDT' if symbol.endswith('USDT') else symbol
     df = get_candles(ccxt_symbol, timeframe)
 
@@ -88,47 +89,44 @@ def generate_chart(symbol, timeframe, direction, entry, dobar_low, dobar_high, t
     x_range = x_right - x_left
 
     # Зона ДОБОРУ
-    dobar_color = '#c0392b' if direction == 'SHORT' else '#2d7a2d'
-    dobar_rect = plt.Rectangle(
-        (x_left, min(dobar_low, dobar_high)),
-        x_range,
-        abs(dobar_high - dobar_low),
-        color=dobar_color,
-        alpha=0.25,
-        zorder=0
-    )
-    ax.add_patch(dobar_rect)
+    if show_dobar:
+        dobar_color = '#c0392b' if direction == 'SHORT' else '#2d7a2d'
+        dobar_rect = plt.Rectangle(
+            (x_left, min(dobar_low, dobar_high)),
+            x_range,
+            abs(dobar_high - dobar_low),
+            color=dobar_color,
+            alpha=0.25,
+            zorder=0
+        )
+        ax.add_patch(dobar_rect)
 
-    ax.text(
-        x_right - x_range * 0.02,
-        (dobar_low + dobar_high) / 2,
-        'ДОБОР',
-        fontsize=8, va='center', ha='right',
-        color='white',
-        bbox=dict(boxstyle='round,pad=0.2', facecolor=dobar_color, edgecolor='none', alpha=0.8)
-    )
-
-    # Підписи рівнів добору
-    ax.text(
-        1.01, dobar_low, f'{dobar_low}',
-        transform=ax.get_yaxis_transform(),
-        fontsize=8, va='center', color='white',
-        bbox=dict(boxstyle='round,pad=0.2', facecolor=dobar_color, edgecolor='none', alpha=0.8)
-    )
-    ax.text(
-        1.01, dobar_high, f'{dobar_high}',
-        transform=ax.get_yaxis_transform(),
-        fontsize=8, va='center', color='white',
-        bbox=dict(boxstyle='round,pad=0.2', facecolor=dobar_color, edgecolor='none', alpha=0.8)
-    )
+        ax.text(
+            x_right - x_range * 0.02,
+            (dobar_low + dobar_high) / 2,
+            'ДОБОР',
+            fontsize=8, va='center', ha='right',
+            color='white',
+            bbox=dict(boxstyle='round,pad=0.2', facecolor=dobar_color, edgecolor='none', alpha=0.8)
+        )
+        ax.text(
+            1.01, dobar_low, f'{dobar_low}',
+            transform=ax.get_yaxis_transform(),
+            fontsize=8, va='center', color='white',
+            bbox=dict(boxstyle='round,pad=0.2', facecolor=dobar_color, edgecolor='none', alpha=0.8)
+        )
+        ax.text(
+            1.01, dobar_high, f'{dobar_high}',
+            transform=ax.get_yaxis_transform(),
+            fontsize=8, va='center', color='white',
+            bbox=dict(boxstyle='round,pad=0.2', facecolor=dobar_color, edgecolor='none', alpha=0.8)
+        )
 
     # Мітка SHORT/LONG
     label_color = '#c0392b' if direction == 'SHORT' else '#27ae60'
     x_label = x_right - x_range * 0.35
-    y_label = entry
-
     ax.text(
-        x_label, y_label,
+        x_label, entry,
         f' {direction} ',
         fontsize=13, va='center', ha='center',
         color='white', fontweight='bold',
@@ -153,11 +151,11 @@ def generate_chart(symbol, timeframe, direction, entry, dobar_low, dobar_high, t
         )
 
     # TP підписи
-    tp_labels = ['TP1', 'TP2', 'TP3', 'TP4']
+    tp_labels_list = ['TP1', 'TP2', 'TP3', 'TP4']
     for i, (tp_price, prob, pct) in enumerate(tps):
         is_hit = i in hit_tps
         checkmark = '✓ ' if is_hit else ''
-        label = f'{checkmark}{tp_labels[i]}  {tp_price}  (-{pct}%)'
+        label = f'{checkmark}{tp_labels_list[i]}  {tp_price}  (-{pct}%)'
         bg = '#2d7a2d' if is_hit else '#1a1a1a'
         ax.text(
             1.01, tp_price, label,
@@ -212,10 +210,20 @@ def format_signal(symbol, timeframe, direction, entry, dobar_low, dobar_high, tp
         lines.append(f"🛑 СТОП : {stop_loss}")
     lines.append(f"")
 
-    tp_labels = ['TP1', 'TP2', 'TP3', 'TP4']
+    tp_labels_list = ['TP1', 'TP2', 'TP3', 'TP4']
     for i, (tp_price, prob, pct) in enumerate(tps):
         check = "✅ " if i in hit_tps else ""
-        lines.append(f"🎯 {check}{tp_labels[i]} : {tp_price} (🔥{prob}%) | (💰{pct}%)")
+
+        if prob >= 70:
+            fire = "🔥"
+        elif prob >= 40:
+            fire = "⚡"
+        elif prob >= 20:
+            fire = "🌡"
+        else:
+            fire = "❄️"
+
+        lines.append(f"🎯 {check}{tp_labels_list[i]} : {tp_price} ({fire}{prob}%) | (💰{pct}%)")
 
     lines.append(f"")
     if stats['count'] > 0:
@@ -232,11 +240,20 @@ async def monitor_signal(bot, signal):
     tps = signal['tps']
     hit_tps = set()
     chart_message_id = signal['chart_message_id']
+    start_time = asyncio.get_event_loop().time()
+    breakeven = False
 
     ccxt_symbol = symbol[:-4] + '/USDT' if symbol.endswith('USDT') else symbol
     print(f"Моніторинг {symbol} {signal['timeframe']} {direction}...")
 
-    while len(hit_tps) < len(tps):
+    def elapsed_str():
+        elapsed = int(asyncio.get_event_loop().time() - start_time)
+        d = elapsed // 86400
+        h = (elapsed % 86400) // 3600
+        m = (elapsed % 3600) // 60
+        return f"{d}d {h}h {m}m"
+
+    while True:
         await asyncio.sleep(30)
 
         try:
@@ -245,6 +262,96 @@ async def monitor_signal(bot, signal):
             print(f"Помилка отримання ціни {symbol}: {e}")
             continue
 
+        stop_loss = signal.get('stop_loss')
+        entry = signal['entry']
+
+        # Перевірка стоп-лосс
+        if stop_loss:
+            sl_hit = (direction == 'SHORT' and price >= stop_loss) or \
+                     (direction == 'LONG' and price <= stop_loss)
+
+            if sl_hit:
+                elapsed = elapsed_str()
+                sl_pct = round(abs(price - entry) / entry * 100, 1)
+
+                total_profit = 0.0
+                tp_summary_lines = []
+                for i in sorted(hit_tps):
+                    tp_price_i = tps[i][0]
+                    tp_pct_i = tps[i][2]
+                    total_profit += tp_pct_i
+                    tp_summary_lines.append(f"✅ TP{i+1}: {tp_price_i} | +{tp_pct_i}%")
+
+                msg_lines = [
+                    f"#{symbol} {signal['timeframe']} "
+                    f"{'LONG 📈' if direction == 'LONG' else 'SHORT 📉'}",
+                    f"",
+                ]
+
+                if tp_summary_lines:
+                    msg_lines.extend(tp_summary_lines)
+                    msg_lines.append(f"")
+                    msg_lines.append(f"🛑 Stop-Loss спрацював ({elapsed}) | -{sl_pct}%")
+                    msg_lines.append(f"")
+                    msg_lines.append(f"💰 Загальний прибуток: +{round(total_profit, 1)}%")
+                    msg_lines.append(f"❌ Сигнал закрито по стопу")
+                else:
+                    msg_lines.append(f"🛑 Stop-Loss спрацював ({elapsed}) | -{sl_pct}%")
+                    msg_lines.append(f"💸 TP не було досягнуто")
+                    msg_lines.append(f"❌ Сигнал закрито по стопу")
+
+                try:
+                    await bot.send_message(
+                        chat_id=CHAT_ID,
+                        text="\n".join(msg_lines),
+                        reply_to_message_id=chart_message_id
+                    )
+                except Exception as e:
+                    print(f"Помилка відправки СЛ {symbol}: {e}")
+
+                close_signal(signal.get('stat_id'), 'sl', -sl_pct)
+                break
+
+        # Перевірка БУ після TP1
+        if breakeven and 0 in hit_tps:
+            be_hit = (direction == 'SHORT' and price >= entry) or \
+                     (direction == 'LONG' and price <= entry)
+
+            if be_hit:
+                elapsed = elapsed_str()
+
+                total_profit = 0.0
+                tp_summary_lines = []
+                for i in sorted(hit_tps):
+                    tp_price_i = tps[i][0]
+                    tp_pct_i = tps[i][2]
+                    total_profit += tp_pct_i
+                    tp_summary_lines.append(f"✅ TP{i+1}: {tp_price_i} | +{tp_pct_i}%")
+
+                msg_lines = [
+                    f"#{symbol} {signal['timeframe']} "
+                    f"{'LONG 📈' if direction == 'LONG' else 'SHORT 📉'}",
+                    f"",
+                ]
+                msg_lines.extend(tp_summary_lines)
+                msg_lines.append(f"")
+                msg_lines.append(f"↩️ Ціна повернулась до беззбитку ({elapsed})")
+                msg_lines.append(f"💰 Прибуток: +{round(total_profit, 1)}%")
+                msg_lines.append(f"✅ Сигнал закрито в БУ")
+
+                try:
+                    await bot.send_message(
+                        chat_id=CHAT_ID,
+                        text="\n".join(msg_lines),
+                        reply_to_message_id=chart_message_id
+                    )
+                except Exception as e:
+                    print(f"Помилка відправки БУ {symbol}: {e}")
+
+                close_signal(signal.get('stat_id'), 'be', round(total_profit, 1))
+                break
+
+        # Перевірка досягнення TP
         new_hits = set()
         for i, (tp_price, prob, pct) in enumerate(tps):
             if direction == 'SHORT' and price <= tp_price:
@@ -254,7 +361,15 @@ async def monitor_signal(bot, signal):
 
         if new_hits - hit_tps:
             hit_tps = hit_tps | new_hits
+            elapsed = elapsed_str()
             print(f"✅ {symbol} досягнуто TP: {hit_tps}")
+
+            # Після TP1 — переводимо стоп в БУ
+            if 0 in hit_tps and not breakeven:
+                breakeven = True
+                signal['stop_loss'] = entry
+                signal['show_dobar'] = False
+                print(f"🔄 {symbol} стоп переведено в БУ: {entry}")
 
             new_text = format_signal(
                 symbol, signal['timeframe'], direction,
@@ -268,7 +383,8 @@ async def monitor_signal(bot, signal):
                 symbol, signal['timeframe'], direction,
                 signal['entry'], signal['dobar_low'], signal['dobar_high'],
                 tps, list(hit_tps),
-                stop_loss=signal.get('stop_loss')
+                stop_loss=signal.get('stop_loss'),
+                show_dobar=signal.get('show_dobar', True)
             )
 
             try:
@@ -284,15 +400,44 @@ async def monitor_signal(bot, signal):
             except Exception as e:
                 print(f"Помилка відправки оновлення {symbol}: {e}")
 
+            # Всі TP досягнуті
             if len(hit_tps) == len(tps):
+                last_tp = max(hit_tps)
+                tp_price_final = tps[last_tp][0]
+                tp_pct_final = tps[last_tp][2]
+                total_profit = sum(tps[i][2] for i in hit_tps)
+
+                tp_summary_lines = []
+                for i in sorted(hit_tps):
+                    tp_summary_lines.append(
+                        f"✅ TP{i+1}: {tps[i][0]} | +{tps[i][2]}%"
+                    )
+
+                msg_lines = [
+                    f"#{symbol} {signal['timeframe']} "
+                    f"{'LONG 📈' if direction == 'LONG' else 'SHORT 📉'}",
+                    f"",
+                ]
+                msg_lines.extend(tp_summary_lines)
+                msg_lines.append(f"")
+                msg_lines.append(
+                    f"🎯 TP{last_tp+1}: {tp_price_final} ✅ ({elapsed})"
+                )
+                msg_lines.append(
+                    f"💰 Загальний прибуток: +{round(total_profit, 1)}%"
+                )
+                msg_lines.append(f"🏁 Сигнал закрито")
+
                 try:
                     await bot.send_message(
                         chat_id=CHAT_ID,
-                        text=f"🏁 #{symbol} {signal['timeframe']} — Сигнал закрито! Всі цілі досягнуті ✅",
+                        text="\n".join(msg_lines),
                         reply_to_message_id=chart_message_id
                     )
                 except Exception as e:
                     print(f"Помилка відправки закриття {symbol}: {e}")
+
+                close_signal(signal.get('stat_id'), 'tp', round(total_profit, 1))
                 break
 
 async def scan_and_send(bot, active_signals, timeframes):
@@ -307,6 +452,15 @@ async def scan_and_send(bot, active_signals, timeframes):
         existing_keys = [f"{s['symbol']}_{s['timeframe']}" for s in active_signals]
 
         if key not in existing_keys:
+            conflict = any(
+                s['symbol'] == signal['symbol'] and
+                s['direction'] != signal['direction']
+                for s in active_signals
+            )
+            if conflict:
+                print(f"⚠️ Конфлікт сигналів для {signal['symbol']} — пропускаємо")
+                continue
+
             try:
                 signal_text = format_signal(
                     signal['symbol'], signal['timeframe'],
@@ -338,6 +492,15 @@ async def scan_and_send(bot, active_signals, timeframes):
                 active_signals.append(signal)
                 new_count += 1
 
+                signal_id = add_signal(
+                    signal['symbol'],
+                    signal['timeframe'],
+                    signal['direction'],
+                    signal['entry'],
+                    signal.get('tier', '🟢')
+                )
+                signal['stat_id'] = signal_id
+
                 asyncio.create_task(monitor_signal(bot, signal))
                 await asyncio.sleep(5)
 
@@ -347,6 +510,116 @@ async def scan_and_send(bot, active_signals, timeframes):
 
     if new_count > 0:
         print(f"Відправлено {new_count} нових сигналів.")
+
+async def handle_updates(bot, active_signals):
+    offset = None
+    while True:
+        try:
+            updates = await bot.get_updates(offset=offset, timeout=10)
+            for update in updates:
+                offset = update.update_id + 1
+
+                if update.message and update.message.text:
+                    text = update.message.text
+                    chat_id = update.message.chat.id
+
+                    if text == '/start':
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text="🤖 Сигнальний бот\nОберіть дію:",
+                            reply_markup={
+                                'inline_keyboard': [
+                                    [{'text': '📊 Статистика', 'callback_data': 'stats'}],
+                                    [{'text': '⏳ Активні сигнали', 'callback_data': 'active'}],
+                                    [{'text': 'ℹ️ Про бота', 'callback_data': 'info'}],
+                                    [{'text': '🗑 Очистити статистику', 'callback_data': 'clear'}],
+                                ]
+                            }
+                        )
+
+                    elif text == '/stats':
+                        summary = get_summary()
+                        await bot.send_message(chat_id=chat_id, text=summary)
+
+                    elif text == '/active':
+                        if not active_signals:
+                            msg = "⏳ Активних сигналів немає"
+                        else:
+                            lines = ["⏳ Активні сигнали:\n"]
+                            for s in active_signals:
+                                lines.append(
+                                    f"{s.get('tier','🟢')} #{s['symbol']} "
+                                    f"{s['timeframe']} {s['direction']} | "
+                                    f"Entry: {s['entry']}"
+                                )
+                            msg = "\n".join(lines)
+                        await bot.send_message(chat_id=chat_id, text=msg)
+
+                if update.callback_query:
+                    query = update.callback_query
+                    chat_id = query.message.chat.id
+                    await bot.answer_callback_query(query.id)
+
+                    if query.data == 'stats':
+                        summary = get_summary()
+                        await bot.send_message(chat_id=chat_id, text=summary)
+
+                    elif query.data == 'active':
+                        if not active_signals:
+                            msg = "⏳ Активних сигналів немає"
+                        else:
+                            lines = ["⏳ Активні сигнали:\n"]
+                            for s in active_signals:
+                                lines.append(
+                                    f"{s.get('tier','🟢')} #{s['symbol']} "
+                                    f"{s['timeframe']} {s['direction']} | "
+                                    f"Entry: {s['entry']}"
+                                )
+                            msg = "\n".join(lines)
+                        await bot.send_message(chat_id=chat_id, text=msg)
+
+                    elif query.data == 'info':
+                        msg = (
+                            "🤖 Сигнальний бот\n\n"
+                            "📊 Біржа: Binance Futures\n"
+                            "⏱ Таймфрейми: 5m · 15m · 1h · 4h · 1d\n"
+                            "🔍 Індикатори: EMA20 · EMA50 · RSI · ATR\n"
+                            "✅ Фільтр: TP1 ≥ 60% · мін. 15 угод\n"
+                            "🛑 Стоп-лосс: ATR × 2.0\n"
+                            "↩️ БУ: після досягнення TP1\n"
+                        )
+                        await bot.send_message(chat_id=chat_id, text=msg)
+
+                    elif query.data == 'clear':
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text="⚠️ Ви впевнені що хочете очистити статистику?",
+                            reply_markup={
+                                'inline_keyboard': [
+                                    [
+                                        {'text': '✅ Так, очистити', 'callback_data': 'clear_confirm'},
+                                        {'text': '❌ Скасувати', 'callback_data': 'clear_cancel'},
+                                    ]
+                                ]
+                            }
+                        )
+
+                    elif query.data == 'clear_confirm':
+                        clear_stats()
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text="✅ Статистику очищено!"
+                        )
+
+                    elif query.data == 'clear_cancel':
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text="❌ Очищення скасовано"
+                        )
+
+        except Exception as e:
+            print(f"Помилка обробки оновлень: {e}")
+            await asyncio.sleep(5)
 
 async def main():
     bot = Bot(token=BOT_TOKEN, request=request)
@@ -382,12 +655,23 @@ async def main():
             await scan_and_send(bot, active_signals, ['1d'])
             await asyncio.sleep(4 * 60 * 60)
 
+    async def daily_stats():
+        while True:
+            await asyncio.sleep(24 * 60 * 60)
+            summary = get_summary()
+            try:
+                await bot.send_message(chat_id=CHAT_ID, text=summary)
+            except Exception as e:
+                print(f"Помилка відправки статистики: {e}")
+
     await asyncio.gather(
         loop_5m(),
         loop_15m(),
         loop_1h(),
         loop_4h(),
         loop_1d(),
+        daily_stats(),
+        handle_updates(bot, active_signals),
     )
 
 asyncio.run(main())

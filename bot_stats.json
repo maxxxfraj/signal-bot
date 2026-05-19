@@ -1,0 +1,87 @@
+{
+  "total_signals": 6,
+  "closed_tp": 0,
+  "closed_sl": 0,
+  "closed_be": 0,
+  "active": 6,
+  "signals": [
+    {
+      "id": 1,
+      "symbol": "XRPUSDT",
+      "timeframe": "1d",
+      "direction": "SHORT",
+      "entry": 1.3761,
+      "tier": "🟢",
+      "status": "active",
+      "opened_at": "2026-05-19T12:45:41.431744",
+      "closed_at": null,
+      "result": null,
+      "pct": null
+    },
+    {
+      "id": 2,
+      "symbol": "BNBUSDT",
+      "timeframe": "1h",
+      "direction": "SHORT",
+      "entry": 641.16,
+      "tier": "🟡",
+      "status": "active",
+      "opened_at": "2026-05-19T12:45:41.515066",
+      "closed_at": null,
+      "result": null,
+      "pct": null
+    },
+    {
+      "id": 3,
+      "symbol": "ATOMUSDT",
+      "timeframe": "15m",
+      "direction": "LONG",
+      "entry": 2.063,
+      "tier": "🟢",
+      "status": "active",
+      "opened_at": "2026-05-19T12:45:41.611010",
+      "closed_at": null,
+      "result": null,
+      "pct": null
+    },
+    {
+      "id": 4,
+      "symbol": "XRPUSDT",
+      "timeframe": "1h",
+      "direction": "SHORT",
+      "entry": 1.376,
+      "tier": "🟡",
+      "status": "active",
+      "opened_at": "2026-05-19T12:45:47.535570",
+      "closed_at": null,
+      "result": null,
+      "pct": null
+    },
+    {
+      "id": 5,
+      "symbol": "UNIUSDT",
+      "timeframe": "1d",
+      "direction": "LONG",
+      "entry": 3.492,
+      "tier": "🟢",
+      "status": "active",
+      "opened_at": "2026-05-19T12:45:47.772377",
+      "closed_at": null,
+      "result": null,
+      "pct": null
+    },
+    {
+      "id": 6,
+      "symbol": "DOGEUSDT",
+      "timeframe": "1h",
+      "direction": "SHORT",
+      "entry": 0.10418,
+      "tier": "🟡",
+      "status": "active",
+      "opened_at": "2026-05-19T12:45:53.383905",
+      "closed_at": null,
+      "result": null,
+      "pct": null
+    }
+  ]
+}
