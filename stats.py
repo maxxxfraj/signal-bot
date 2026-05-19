@@ -84,7 +84,9 @@ def get_summary():
     active = stats['active']
     closed = tp + sl + be
 
-    winrate = round(tp / closed * 100) if closed > 0 else 0
+    # БУ після TP1 = також позитивний результат
+    positive = tp + be
+    winrate = round(positive / closed * 100) if closed > 0 else 0
 
     lines = [
         "📊 Статистика бота",
