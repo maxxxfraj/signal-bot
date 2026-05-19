@@ -9,10 +9,11 @@ from dotenv import load_dotenv
 from scanner import scan_all
 from keep_alive import keep_alive
 from stats import add_signal, close_signal, get_summary, clear_stats
+from active_store import save_active, load_active, remove_active
 import os
 import io
 import sys
-# Вимикаємо буферизацію виводу
+
 sys.stdout.reconfigure(line_buffering=True)
 
 load_dotenv()
@@ -91,7 +92,6 @@ def generate_chart(symbol, timeframe, direction, entry, dobar_low, dobar_high, t
     x_left = xlim[0]
     x_range = x_right - x_left
 
-    # Зона ДОБОРУ
     if show_dobar:
         dobar_color = '#c0392b' if direction == 'SHORT' else '#2d7a2d'
         dobar_rect = plt.Rectangle(
@@ -125,7 +125,6 @@ def generate_chart(symbol, timeframe, direction, entry, dobar_low, dobar_high, t
             bbox=dict(boxstyle='round,pad=0.2', facecolor=dobar_color, edgecolor='none', alpha=0.8)
         )
 
-    # Мітка SHORT/LONG
     label_color = '#c0392b' if direction == 'SHORT' else '#27ae60'
     x_label = x_right - x_range * 0.35
     ax.text(
@@ -136,7 +135,6 @@ def generate_chart(symbol, timeframe, direction, entry, dobar_low, dobar_high, t
         bbox=dict(boxstyle='round,pad=0.4', facecolor=label_color, edgecolor='white', linewidth=1.5)
     )
 
-    # Entry підпис
     ax.text(
         1.01, entry, f'Entry  {entry}',
         transform=ax.get_yaxis_transform(),
@@ -144,7 +142,6 @@ def generate_chart(symbol, timeframe, direction, entry, dobar_low, dobar_high, t
         bbox=dict(boxstyle='round,pad=0.3', facecolor='#1a6dcc', edgecolor='none')
     )
 
-    # Стоп-лосс підпис
     if stop_loss:
         ax.text(
             1.01, stop_loss, f'SL  {stop_loss}',
@@ -153,7 +150,6 @@ def generate_chart(symbol, timeframe, direction, entry, dobar_low, dobar_high, t
             bbox=dict(boxstyle='round,pad=0.3', facecolor='#e74c3c', edgecolor='none')
         )
 
-    # TP підписи
     tp_labels_list = ['TP1', 'TP2', 'TP3', 'TP4']
     for i, (tp_price, prob, pct) in enumerate(tps):
         is_hit = i in hit_tps
@@ -167,7 +163,6 @@ def generate_chart(symbol, timeframe, direction, entry, dobar_low, dobar_high, t
             bbox=dict(boxstyle='round,pad=0.3', facecolor=bg, edgecolor='none')
         )
 
-    # Кола на досягнутих TP
     for i in hit_tps:
         tp_price = tps[i][0]
         ax.plot(
@@ -187,7 +182,6 @@ def generate_chart(symbol, timeframe, direction, entry, dobar_low, dobar_high, t
             color='#1a1a1a', zorder=6
         )
 
-    # Заголовок
     dir_text = 'SHORT' if direction == 'SHORT' else 'LONG'
     ax.set_title(
         f'{symbol} · {timeframe} · {dir_text}',
@@ -313,6 +307,7 @@ async def monitor_signal(bot, signal):
                     print(f"Помилка відправки СЛ {symbol}: {e}")
 
                 close_signal(signal.get('stat_id'), 'sl', -sl_pct)
+                remove_active(symbol, signal['timeframe'])
                 break
 
         # Перевірка БУ після TP1
@@ -352,6 +347,7 @@ async def monitor_signal(bot, signal):
                     print(f"Помилка відправки БУ {symbol}: {e}")
 
                 close_signal(signal.get('stat_id'), 'be', round(total_profit, 1))
+                remove_active(symbol, signal['timeframe'])
                 break
 
         # Перевірка досягнення TP
@@ -367,7 +363,6 @@ async def monitor_signal(bot, signal):
             elapsed = elapsed_str()
             print(f"✅ {symbol} досягнуто TP: {hit_tps}")
 
-            # Після TP1 — переводимо стоп в БУ
             if 0 in hit_tps and not breakeven:
                 breakeven = True
                 signal['stop_loss'] = entry
@@ -403,7 +398,6 @@ async def monitor_signal(bot, signal):
             except Exception as e:
                 print(f"Помилка відправки оновлення {symbol}: {e}")
 
-            # Всі TP досягнуті
             if len(hit_tps) == len(tps):
                 last_tp = max(hit_tps)
                 tp_price_final = tps[last_tp][0]
@@ -441,6 +435,7 @@ async def monitor_signal(bot, signal):
                     print(f"Помилка відправки закриття {symbol}: {e}")
 
                 close_signal(signal.get('stat_id'), 'tp', round(total_profit, 1))
+                remove_active(symbol, signal['timeframe'])
                 break
 
 async def scan_and_send(bot, active_signals, timeframes):
@@ -493,6 +488,7 @@ async def scan_and_send(bot, active_signals, timeframes):
 
                 signal['chart_message_id'] = sent.message_id
                 active_signals.append(signal)
+                save_active(active_signals)
                 new_count += 1
 
                 signal_id = add_signal(
@@ -525,6 +521,14 @@ async def handle_updates(bot, active_signals):
                 if update.message and update.message.text:
                     text = update.message.text
                     chat_id = update.message.chat.id
+                    user_id = update.message.from_user.id
+
+                    if str(user_id) != str(os.getenv("ADMIN_ID")):
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text="⛔ Доступ заборонено"
+                        )
+                        continue
 
                     if text == '/start':
                         await bot.send_message(
@@ -561,6 +565,12 @@ async def handle_updates(bot, active_signals):
                 if update.callback_query:
                     query = update.callback_query
                     chat_id = query.message.chat.id
+                    user_id = query.from_user.id
+
+                    if str(user_id) != str(os.getenv("ADMIN_ID")):
+                        await bot.answer_callback_query(query.id, text="⛔ Доступ заборонено")
+                        continue
+
                     await bot.answer_callback_query(query.id)
 
                     if query.data == 'stats':
@@ -626,7 +636,16 @@ async def handle_updates(bot, active_signals):
 
 async def main():
     bot = Bot(token=BOT_TOKEN, request=request)
-    active_signals = []
+
+    # Завантажуємо активні сигнали з диску
+    active_signals = load_active()
+    print(f"Завантажено {len(active_signals)} активних сигналів з диску")
+
+    # Відновлюємо моніторинг для кожного
+    for signal in active_signals:
+        if signal.get('chart_message_id'):
+            asyncio.create_task(monitor_signal(bot, signal))
+            print(f"🔄 Відновлено моніторинг: {signal['symbol']} {signal['timeframe']}")
 
     async def loop_5m():
         while True:
