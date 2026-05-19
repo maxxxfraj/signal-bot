@@ -627,32 +627,47 @@ async def main():
 
     async def loop_5m():
         while True:
-            print("Сканування 5m...")
-            await scan_and_send(bot, active_signals, ['5m'])
+            try:
+                print("Сканування 5m...")
+                await scan_and_send(bot, active_signals, ['5m'])
+            except Exception as e:
+                print(f"Помилка loop_5m: {e}")
             await asyncio.sleep(5 * 60)
 
     async def loop_15m():
         while True:
-            print("Сканування 15m...")
-            await scan_and_send(bot, active_signals, ['15m'])
+            try:
+                print("Сканування 15m...")
+                await scan_and_send(bot, active_signals, ['15m'])
+            except Exception as e:
+                print(f"Помилка loop_15m: {e}")
             await asyncio.sleep(15 * 60)
 
     async def loop_1h():
         while True:
-            print("Сканування 1h...")
-            await scan_and_send(bot, active_signals, ['1h'])
+            try:
+                print("Сканування 1h...")
+                await scan_and_send(bot, active_signals, ['1h'])
+            except Exception as e:
+                print(f"Помилка loop_1h: {e}")
             await asyncio.sleep(30 * 60)
 
     async def loop_4h():
         while True:
-            print("Сканування 4h...")
-            await scan_and_send(bot, active_signals, ['4h'])
+            try:
+                print("Сканування 4h...")
+                await scan_and_send(bot, active_signals, ['4h'])
+            except Exception as e:
+                print(f"Помилка loop_4h: {e}")
             await asyncio.sleep(60 * 60)
 
     async def loop_1d():
         while True:
-            print("Сканування 1d...")
-            await scan_and_send(bot, active_signals, ['1d'])
+            try:
+                print("Сканування 1d...")
+                await scan_and_send(bot, active_signals, ['1d'])
+            except Exception as e:
+                print(f"Помилка loop_1d: {e}")
             await asyncio.sleep(4 * 60 * 60)
 
     async def daily_stats():
@@ -674,4 +689,12 @@ async def main():
         handle_updates(bot, active_signals),
     )
 
-asyncio.run(main())
+async def safe_main():
+    try:
+        await main()
+    except Exception as e:
+        print(f"КРИТИЧНА ПОМИЛКА: {e}")
+        import traceback
+        traceback.print_exc()
+
+asyncio.run(safe_main())
