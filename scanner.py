@@ -2,8 +2,11 @@ import ccxt
 import pandas as pd
 import ta
 from backtest import run_backtest
+import asyncio
 
-exchange = ccxt.binance()
+exchange = ccxt.binance({
+    'enableRateLimit': True,
+})
 
 WATCHLIST = [
     'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT',
@@ -12,9 +15,9 @@ WATCHLIST = [
     'ATOM/USDT', 'LTC/USDT', 'ETC/USDT', 'FIL/USDT',
 ]
 
-TIMEFRAMES = ['5m', '15m', '1h', '4h', '1d']
+TIMEFRAMES = ['5m', '15m', '30m', '1h', '4h', '1d']
 
-def get_candles(symbol, timeframe, limit=1000):
+def _get_candles_sync(symbol, timeframe, limit=1000):
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -25,6 +28,9 @@ def get_candles(symbol, timeframe, limit=1000):
         print(f"Помилка отримання свічок {symbol}: {e}")
         return None
 
+async def get_candles(symbol, timeframe, limit=1000):
+    return await asyncio.to_thread(_get_candles_sync, symbol, timeframe, limit)
+
 def calculate_indicators(df):
     df['ema20'] = ta.trend.ema_indicator(df['close'], window=20)
     df['ema50'] = ta.trend.ema_indicator(df['close'], window=50)
@@ -34,8 +40,8 @@ def calculate_indicators(df):
     )
     return df
 
-def find_signal(symbol, timeframe):
-    df = get_candles(symbol, timeframe, limit=1000)
+async def find_signal(symbol, timeframe):
+    df = await get_candles(symbol, timeframe, limit=1000)
     if df is None or len(df) < 60:
         return None
 
@@ -45,9 +51,7 @@ def find_signal(symbol, timeframe):
     if len(df) < 3:
         return None
 
-    # Остання закрита свічка для індикаторів
     last = df.iloc[-2]
-    # Поточна свічка для ціни входу
     current = df.iloc[-1]
 
     price = current['close']
@@ -99,15 +103,12 @@ def find_signal(symbol, timeframe):
             (round(entry + atr * 3.0, 6), 40, round(atr * 3.0 / entry * 100, 1)),
         ]
 
-    # Бектест — передаємо вже готовий df
     stats = run_backtest(df, direction)
 
-    # Фільтр слабких стратегій
     if not stats.get('is_valid', False):
         print(f"⛔ {symbol} {timeframe} {direction} — слабка стратегія, пропускаємо")
         return None
 
-    # Оновлюємо ймовірності TP з бектесту
     if stats['count'] > 0:
         tps_with_probs = []
         for i, (tp_price, _, pct) in enumerate(tps):
@@ -115,7 +116,6 @@ def find_signal(symbol, timeframe):
             tps_with_probs.append((tp_price, prob, pct))
         tps = tps_with_probs
 
-    # Визначаємо Tier
     tp1_prob = stats['tp_probs'][0] if stats['count'] > 0 else 50
     if tp1_prob >= 70:
         tier = '🟢'
@@ -137,7 +137,7 @@ def find_signal(symbol, timeframe):
         'stop_loss': stop_loss,
     }
 
-def scan_all(timeframes=None):
+async def scan_all(timeframes=None):
     if timeframes is None:
         timeframes = TIMEFRAMES
 
@@ -146,7 +146,7 @@ def scan_all(timeframes=None):
 
     for symbol in WATCHLIST:
         for timeframe in timeframes:
-            signal = find_signal(symbol, timeframe)
+            signal = await find_signal(symbol, timeframe)
             if signal:
                 print(f"✅ Сигнал знайдено: {signal['symbol']} {timeframe} {signal['direction']}")
                 signals.append(signal)
