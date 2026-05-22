@@ -26,9 +26,9 @@
     "SOL/USDT",
     "XRP/USDT"
   ],
-  "min_tp1_prob": 50,
+  "min_tp1_prob": 35,
   "htf_bias_enabled": false,
-  "htf_diff_threshold": 1.0,
+  "htf_diff_threshold": 1.1,
   "stop_atr_mult": 2.0,
   "tp1_atr_mult": 0.8,
   "max_active_signals": 20,

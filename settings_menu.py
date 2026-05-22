@@ -114,11 +114,18 @@ def risk_keyboard():
 
 
 def filters_keyboard():
-    """Меню фільтрів стратегій"""
+    """Меню фільтрів стратегій (повертає і текст, і клавіатуру)"""
     htf = get_setting('htf_bias_enabled')
     min_prob = get_setting('min_tp1_prob')
     htf_thresh = get_setting('htf_diff_threshold')
 
+    text = (
+        f"🔍 Фільтри стратегій\n\n"
+        f"HTF bias фільтр: {'увімк.' if htf else 'вимк.'}\n"
+        f"Мін. ймовірність TP1: <b>{min_prob}%</b>\n"
+        f"HTF поріг (різниця EMA): <b>{htf_thresh}%</b>\n\n"
+        f"Використовуй ➖/➕ для зміни"
+    )
     keyboard = [
         [InlineKeyboardButton(
             f"{'✅' if htf else '⬜'} HTF bias фільтр",
@@ -136,7 +143,7 @@ def filters_keyboard():
         ],
         [InlineKeyboardButton("◀️ Назад", callback_data="cfg_back")],
     ]
-    return InlineKeyboardMarkup(keyboard)
+    return text, InlineKeyboardMarkup(keyboard)
 
 
 def get_settings_text():

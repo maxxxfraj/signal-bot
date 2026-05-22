@@ -347,7 +347,8 @@ async def find_signal(symbol, timeframe):
         strategy_type=strategy_type,
         stop_mult=stop_mult,
         tp1_mult=tp1_mult,
-        min_trades=min_trades
+        min_trades=min_trades,
+        min_prob=get_setting('min_tp1_prob') # <--- Тепер бектестер читає ваші налаштування з Telegram!
     )
 
     if not stats or not stats.get('is_valid', False):

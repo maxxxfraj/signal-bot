@@ -140,7 +140,7 @@ def get_backtest_signal(row, prev, ema_fast, ema_slow, rsi_min, rsi_max, directi
 
 
 def run_backtest(df, direction, ema_fast=20, ema_slow=50, rsi_min=32, rsi_max=60, 
-                 strategy_type='ema_rsi', stop_mult=2.0, tp1_mult=0.8, min_trades=12):
+                 strategy_type='ema_rsi', stop_mult=2.0, tp1_mult=0.8, min_trades=12, min_prob=55):
     try:
         direction = direction.upper()
         df = df.copy()
@@ -283,9 +283,9 @@ def run_backtest(df, direction, ema_fast=20, ema_slow=50, rsi_min=32, rsi_max=60
             'stop_rate': stop_rate,
             'tp_probs': [tp1_prob, tp2_prob, tp3_prob, tp4_prob],
             'is_valid': (
-                total >= min_trades and
-                tp1_prob >= 55 and
-                avg_pnl > 0
+            total >= min_trades and
+            tp1_prob >= min_prob and  # <--- Тепер тут стоїть динамічний параметр!
+            avg_pnl > 0
             ),
         }
 
