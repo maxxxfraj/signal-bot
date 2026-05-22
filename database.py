@@ -368,7 +368,7 @@ def get_stats_summary():
                     f"SL:{row['sl_cnt']} | {wr}%"
                 )
 
-        # Топ 5 пар за winrate
+# Топ 5 пар за winrate (Повністю адаптовано під синтаксис PostgreSQL)
         cursor.execute('''
             SELECT symbol,
                    COUNT(*) as total,
@@ -376,8 +376,8 @@ def get_stats_summary():
             FROM stats
             WHERE result IN ('tp','be','sl')
             GROUP BY symbol
-            HAVING total >= 3
-            ORDER BY CAST(wins AS REAL)/total DESC
+            HAVING COUNT(*) >= 3
+            ORDER BY CAST(SUM(CASE WHEN result IN ('tp','be') THEN 1 ELSE 0 END) AS REAL) / COUNT(*) DESC
             LIMIT 5
         ''')
         top_pairs = cursor.fetchall()
