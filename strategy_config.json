@@ -1,0 +1,472 @@
+{
+  "BTCUSDT": {
+    "30m": {
+      "LONG": {
+        "ema_fast": 25,
+        "ema_slow": 50,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 69.67
+      }
+    },
+    "4h": {
+      "LONG": {
+        "ema_fast": 8,
+        "ema_slow": 40,
+        "rsi_min": 25,
+        "rsi_max": 60,
+        "score": 66.47,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "ETHUSDT": {
+    "5m": {
+      "LONG": {
+        "ema_fast": 25,
+        "ema_slow": 40,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 52.14
+      }
+    },
+    "15m": {
+      "LONG": {
+        "ema_fast": 15,
+        "ema_slow": 50,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 51.33
+      }
+    },
+    "30m": {
+      "LONG": {
+        "ema_fast": 10,
+        "ema_slow": 40,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 53.41
+      }
+    },
+    "4h": {
+      "LONG": {
+        "ema_fast": 8,
+        "ema_slow": 30,
+        "rsi_min": 25,
+        "rsi_max": 60,
+        "score": 70.53,
+        "strategy_type": "ema_rsi"
+      }
+    },
+    "1h": {
+      "LONG": {
+        "ema_fast": 10,
+        "ema_slow": 40,
+        "rsi_min": 25,
+        "rsi_max": 60,
+        "score": 73.52,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "SOLUSDT": {
+    "5m": {
+      "LONG": {
+        "ema_fast": 25,
+        "ema_slow": 40,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 48.86
+      }
+    },
+    "30m": {
+      "LONG": {
+        "ema_fast": 10,
+        "ema_slow": 40,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 57.29
+      }
+    },
+    "4h": {
+      "LONG": {
+        "ema_fast": 15,
+        "ema_slow": 30,
+        "rsi_min": 25,
+        "rsi_max": 60,
+        "score": 67.96,
+        "strategy_type": "ema_rsi"
+      }
+    },
+    "1h": {
+      "LONG": {
+        "ema_fast": 8,
+        "ema_slow": 30,
+        "rsi_min": 25,
+        "rsi_max": 60,
+        "score": 68.43,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "BNBUSDT": {
+    "5m": {
+      "LONG": {
+        "ema_fast": 10,
+        "ema_slow": 40,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 62.9
+      }
+    },
+    "30m": {
+      "LONG": {
+        "ema_fast": 10,
+        "ema_slow": 40,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 69.48
+      }
+    },
+    "4h": {
+      "LONG": {
+        "ema_fast": 8,
+        "ema_slow": 30,
+        "rsi_min": 25,
+        "rsi_max": 60,
+        "score": 68.67,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "XRPUSDT": {
+    "5m": {
+      "LONG": {
+        "ema_fast": 25,
+        "ema_slow": 40,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 53.54
+      }
+    },
+    "15m": {
+      "LONG": {
+        "ema_fast": 15,
+        "ema_slow": 40,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 73.83
+      }
+    },
+    "30m": {
+      "LONG": {
+        "ema_fast": 15,
+        "ema_slow": 60,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 55.42
+      }
+    }
+  },
+  "DOGEUSDT": {
+    "15m": {
+      "LONG": {
+        "ema_fast": 25,
+        "ema_slow": 40,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 57.2
+      }
+    },
+    "30m": {
+      "LONG": {
+        "ema_fast": 10,
+        "ema_slow": 40,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 61.37
+      }
+    },
+    "4h": {
+      "LONG": {
+        "ema_fast": 20,
+        "ema_slow": 40,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 61.84
+      }
+    },
+    "1h": {
+      "LONG": {
+        "ema_fast": 8,
+        "ema_slow": 30,
+        "rsi_min": 25,
+        "rsi_max": 60,
+        "score": 72.35,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "ADAUSDT": {
+    "30m": {
+      "LONG": {
+        "ema_fast": 10,
+        "ema_slow": 40,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 52.64
+      }
+    },
+    "1h": {
+      "LONG": {
+        "ema_fast": 15,
+        "ema_slow": 30,
+        "rsi_min": 25,
+        "rsi_max": 55,
+        "score": 84.72,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "AVAXUSDT": {
+    "5m": {
+      "LONG": {
+        "ema_fast": 15,
+        "ema_slow": 40,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 51.68
+      }
+    },
+    "15m": {
+      "LONG": {
+        "ema_fast": 15,
+        "ema_slow": 40,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 39.58
+      }
+    },
+    "4h": {
+      "LONG": {
+        "ema_fast": 10,
+        "ema_slow": 40,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 61.74
+      }
+    },
+    "1d": {
+      "LONG": {
+        "ema_fast": 15,
+        "ema_slow": 40,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 32.7
+      }
+    },
+    "1h": {
+      "LONG": {
+        "ema_fast": 8,
+        "ema_slow": 30,
+        "rsi_min": 25,
+        "rsi_max": 60,
+        "score": 75.98,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "DOTUSDT": {
+    "30m": {
+      "LONG": {
+        "ema_fast": 15,
+        "ema_slow": 40,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 59.11
+      }
+    }
+  },
+  "POLUSDT": {
+    "30m": {
+      "LONG": {
+        "ema_fast": 15,
+        "ema_slow": 50,
+        "rsi_min": 25,
+        "rsi_max": 60,
+        "score": 68.69,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "LINKUSDT": {
+    "15m": {
+      "LONG": {
+        "ema_fast": 10,
+        "ema_slow": 40,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 58.67
+      }
+    },
+    "30m": {
+      "LONG": {
+        "ema_fast": 15,
+        "ema_slow": 40,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 57.15
+      }
+    },
+    "1d": {
+      "LONG": {
+        "ema_fast": 10,
+        "ema_slow": 40,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 42.29
+      }
+    },
+    "1h": {
+      "LONG": {
+        "ema_fast": 8,
+        "ema_slow": 40,
+        "rsi_min": 25,
+        "rsi_max": 60,
+        "score": 77.76,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "UNIUSDT": {
+    "5m": {
+      "LONG": {
+        "ema_fast": 15,
+        "ema_slow": 40,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 44.91
+      }
+    },
+    "15m": {
+      "LONG": {
+        "ema_fast": 15,
+        "ema_slow": 40,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 39.43
+      }
+    },
+    "30m": {
+      "LONG": {
+        "ema_fast": 25,
+        "ema_slow": 40,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 57.72
+      }
+    },
+    "4h": {
+      "LONG": {
+        "ema_fast": 10,
+        "ema_slow": 30,
+        "rsi_min": 25,
+        "rsi_max": 60,
+        "score": 67.36,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "ATOMUSDT": {
+    "5m": {
+      "LONG": {
+        "ema_fast": 25,
+        "ema_slow": 60,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 53.43
+      }
+    },
+    "30m": {
+      "LONG": {
+        "ema_fast": 10,
+        "ema_slow": 40,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 58.65
+      }
+    },
+    "4h": {
+      "LONG": {
+        "ema_fast": 12,
+        "ema_slow": 50,
+        "rsi_min": 25,
+        "rsi_max": 60,
+        "score": 73.62,
+        "strategy_type": "ema_rsi"
+      }
+    },
+    "1d": {
+      "SHORT": {
+        "ema_fast": 25,
+        "ema_slow": 30,
+        "rsi_min": 40,
+        "rsi_max": 60,
+        "score": 57.29,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "LTCUSDT": {
+    "5m": {
+      "LONG": {
+        "ema_fast": 25,
+        "ema_slow": 40,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 52.7
+      }
+    },
+    "15m": {
+      "LONG": {
+        "ema_fast": 25,
+        "ema_slow": 60,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 54.04
+      }
+    },
+    "30m": {
+      "SHORT": {
+        "ema_fast": 20,
+        "ema_slow": 30,
+        "rsi_min": 45,
+        "rsi_max": 60,
+        "score": 70.57,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "ETCUSDT": {
+    "30m": {
+      "LONG": {
+        "ema_fast": 15,
+        "ema_slow": 40,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 63.01
+      }
+    },
+    "1h": {
+      "LONG": {
+        "ema_fast": 10,
+        "ema_slow": 50,
+        "rsi_min": 30,
+        "rsi_max": 60,
+        "score": 64.83
+      }
+    }
+  },
+  "FILUSDT": {},
+  "updated_at": "2026-05-22T09:10:39.272165"
+}

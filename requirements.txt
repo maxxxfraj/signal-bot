@@ -8,3 +8,4 @@ mplfinance
 matplotlib
 Pillow
 flask
+psycopg2-binary

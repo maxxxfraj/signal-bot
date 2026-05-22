@@ -1,3 +1,37 @@
 {
-  "active_timeframe": "5m"
+  "active_timeframe": "all",
+  "active_timeframes": [
+    "5m",
+    "15m",
+    "30m",
+    "1h",
+    "4h",
+    "1d"
+  ],
+  "watchlist": [
+    "ETH/USDT",
+    "BNB/USDT",
+    "DOGE/USDT",
+    "ADA/USDT",
+    "AVAX/USDT",
+    "DOT/USDT",
+    "POL/USDT",
+    "LINK/USDT",
+    "UNI/USDT",
+    "ATOM/USDT",
+    "LTC/USDT",
+    "ETC/USDT",
+    "FIL/USDT",
+    "BTC/USDT",
+    "SOL/USDT",
+    "XRP/USDT"
+  ],
+  "min_tp1_prob": 50,
+  "htf_bias_enabled": false,
+  "htf_diff_threshold": 1.0,
+  "stop_atr_mult": 2.0,
+  "tp1_atr_mult": 0.8,
+  "max_active_signals": 20,
+  "exchange_name": "binance",
+  "portfolio_size": 100.0
 }

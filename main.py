@@ -1,6 +1,14 @@
-from settings import get_setting, set_setting
+from settings import get_setting, set_setting, get_exchange_client
+from settings_menu import (
+    main_settings_keyboard,
+    get_settings_text,
+    pairs_keyboard,
+    timeframes_keyboard,
+    risk_keyboard,
+    filters_keyboard,
+)
 import matplotlib
-matplotlib.use('Agg')  # вимикаємо GUI бекенд
+matplotlib.use('Agg')
 import ccxt
 import asyncio
 import pandas as pd
@@ -10,14 +18,25 @@ from telegram import Bot
 from telegram.request import HTTPXRequest
 from dotenv import load_dotenv
 from scanner import scan_all
+import scanner # Імпортуємо для гарячої зміни біржі в сканері
 from keep_alive import keep_alive
-from stats import add_signal, close_signal, get_summary, clear_stats, load_stats, save_stats
-from active_store import save_active, load_active, remove_active, clear_active
+from database import (
+    init_db,
+    save_active_signals, load_active_signals,
+    remove_active_signal, clear_active_signals,
+    add_signal_stat, close_signal_stat,
+    get_stats_summary, clear_stats
+)
 import os
 import io
 import sys
+import urllib3
+# Вимикає довгі технічні попередження про неперевірений SSL у консолі
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 sys.stdout.reconfigure(line_buffering=True)
+
+recently_sent = set()
 
 load_dotenv()
 keep_alive()
@@ -33,22 +52,62 @@ request = HTTPXRequest(
     connect_timeout=30,
 )
 
-exchange = ccxt.binance({
-    'enableRateLimit': True,
-})
+# Ініціалізація динамічного клієнта біржі для малювання графіків
+exchange = get_exchange_client(async_mode=False)
 
-# Завантажуємо збережений таймфрейм
 active_timeframe = get_setting('active_timeframe')
 
 TIMEFRAME_OPTIONS = {
     'all': ['5m', '15m', '30m', '1h', '4h', '1d'],
-    '5m': ['5m'],
-    '15m': ['15m'],
-    '30m': ['30m'],
-    '1h': ['1h'],
-    '4h': ['4h'],
-    '1d': ['1d'],
+    '5m': ['5m'], '15m': ['15m'], '30m': ['30m'],
+    '1h': ['1h'], '4h': ['4h'], '1d': ['1d'],
 }
+
+ALL_PAIRS = [
+    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT',
+    'XRP/USDT', 'DOGE/USDT', 'ADA/USDT', 'AVAX/USDT',
+    'DOT/USDT', 'POL/USDT', 'LINK/USDT', 'UNI/USDT',
+    'ATOM/USDT', 'LTC/USDT', 'ETC/USDT', 'FIL/USDT',
+]
+
+ALL_TIMEFRAMES = ['5m', '15m', '30m', '1h', '4h', '1d']
+
+
+# ─────────────────────────────────────────────
+# CHARTS & FORMATTING (ДИНАМІЧНИЙ РИЗИК ТА ПОСИЛАННЯ)
+# ─────────────────────────────────────────────
+
+def get_exchange_link(symbol):
+    """Генерує точне торгове посилання для ф'ючерсів Binance або MEXC"""
+    exchange_name = get_setting('exchange_name') or 'binance'
+    symbol_clean = symbol.replace('/', '').upper()
+    if exchange_name == 'mexc':
+        # Для MEXC використовується формат монета_USDT
+        base = symbol_clean[:-4]
+        return f"https://futures.mexc.com/exchange/{base}_USDT"
+    else:
+        return f"https://www.binance.com/en/futures/{symbol_clean}"
+
+def calculate_position_size(entry, stop_loss):
+    """Кількісний розрахунок об'єму ф'ючерсної позиції відповідно до волатильності та ризику"""
+    portfolio_size = get_setting('portfolio_size') or 1000.0
+    risk_pct = get_setting('risk_pct') or 1.0
+    
+    # Сума ризику в доларах
+    risk_amount = portfolio_size * (risk_pct / 100.0)
+    
+    # Відсоткова відстань до стоп-лоссу
+    stop_distance_pct = abs(entry - stop_loss) / entry
+    if stop_distance_pct == 0:
+        return 0.0, 0.0, 0.0
+        
+    # Рекомендований повний об'єм позиції у USDT (з урахуванням кредитного плеча)
+    position_size_usd = risk_amount / stop_distance_pct
+    
+    # Рекомендована кількість монет у контрактах
+    position_size_contracts = position_size_usd / entry
+    
+    return round(risk_amount, 2), round(position_size_usd, 2), round(position_size_contracts, 2)
 
 def _get_candles_sync(symbol, timeframe, limit):
     limits = {'5m': 60, '15m': 50, '1h': 40, '4h': 30, '1d': 20}
@@ -70,9 +129,9 @@ def _get_price_sync(symbol):
 async def get_price(symbol):
     return await asyncio.to_thread(_get_price_sync, symbol)
 
-def generate_chart(symbol, timeframe, direction, entry, dobar_low, dobar_high, tps, hit_tps=[], stop_loss=None, show_dobar=True, candles_df=None):
+def generate_chart(symbol, timeframe, direction, entry, dobar_low, dobar_high,
+                   tps, hit_tps=[], stop_loss=None, show_dobar=True, candles_df=None):
     df = candles_df
-
     bg_color = '#f28b82' if direction == 'SHORT' else '#90c97a'
     up_color = '#2d7a2d'
     down_color = '#c0392b'
@@ -92,7 +151,6 @@ def generate_chart(symbol, timeframe, direction, entry, dobar_low, dobar_high, t
 
     hlines = [entry] + [tp[0] for tp in tps]
     hline_colors = ['#1a6dcc'] + ['#1a1a1a'] * len(tps)
-
     if stop_loss:
         hlines.append(stop_loss)
         hline_colors.append('#e74c3c')
@@ -118,9 +176,7 @@ def generate_chart(symbol, timeframe, direction, entry, dobar_low, dobar_high, t
         )
         ax.add_patch(dobar_rect)
         ax.text(
-            x_right - x_range * 0.02,
-            (dobar_low + dobar_high) / 2,
-            'ДОБОР',
+            x_right - x_range * 0.02, (dobar_low + dobar_high) / 2, 'ДОБОР',
             fontsize=8, va='center', ha='right', color='white',
             bbox=dict(boxstyle='round,pad=0.2', facecolor=dobar_color, edgecolor='none', alpha=0.8)
         )
@@ -141,11 +197,9 @@ def generate_chart(symbol, timeframe, direction, entry, dobar_low, dobar_high, t
     x_label = x_right - x_range * 0.35
     ax.text(
         x_label, entry, f' {direction} ',
-        fontsize=13, va='center', ha='center',
-        color='white', fontweight='bold',
+        fontsize=13, va='center', ha='center', color='white', fontweight='bold',
         bbox=dict(boxstyle='round,pad=0.4', facecolor=label_color, edgecolor='white', linewidth=1.5)
     )
-
     ax.text(
         1.01, entry, f'Entry  {entry}',
         transform=ax.get_yaxis_transform(),
@@ -177,41 +231,51 @@ def generate_chart(symbol, timeframe, direction, entry, dobar_low, dobar_high, t
     for i in hit_tps:
         tp_price = tps[i][0]
         ax.plot(
-            x_right - x_range * 0.05, tp_price,
-            'o', markersize=10,
-            markerfacecolor='white',
-            markeredgecolor='#1a1a1a',
+            x_right - x_range * 0.05, tp_price, 'o', markersize=10,
+            markerfacecolor='white', markeredgecolor='#1a1a1a',
             markeredgewidth=1.5, zorder=5
         )
         ax.text(
             x_right - x_range * 0.05, tp_price, '✓',
-            fontsize=7, va='center', ha='center',
-            color='#1a1a1a', zorder=6
+            fontsize=7, va='center', ha='center', color='#1a1a1a', zorder=6
         )
 
     dir_text = 'SHORT' if direction == 'SHORT' else 'LONG'
-    ax.set_title(
-        f'{symbol} · {timeframe} · {dir_text}',
-        loc='right', fontsize=11, color='#1a1a1a', pad=10
-    )
+    ax.set_title(f'{symbol} · {timeframe} · {dir_text}', loc='right',
+                 fontsize=11, color='#1a1a1a', pad=10)
 
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight',
-                facecolor=bg_color, dpi=150)
+    plt.savefig(buf, format='png', bbox_inches='tight', facecolor=bg_color, dpi=150)
     plt.close(fig)
     buf.seek(0)
     return buf
 
-def format_signal(symbol, timeframe, direction, entry, dobar_low, dobar_high, tps, stats, hit_tps=[], tier='🟢', stop_loss=None):
+def format_signal(symbol, timeframe, direction, entry, dobar_low, dobar_high,
+                  tps, stats, hit_tps=[], tier='🟢', stop_loss=None):
     dir_emoji = "📈" if direction == "LONG" else "📉"
+    exchange_name = get_setting('exchange_name') or 'binance'
+    
+    # Отримуємо торгове посилання під активну біржу
+    link = get_exchange_link(symbol)
+    
     lines = []
-    lines.append(f"#{symbol} {timeframe} {tier}")
+    # Хештег стає активним та зручним посиланням на термінал біржі
+    lines.append(f"<a href='{link}'>#{symbol}</a> {timeframe} {tier} (on {exchange_name.upper()})")
     lines.append(f"💎 СТАТУС : {direction} {dir_emoji}")
     lines.append(f"")
     lines.append(f"👉 ENTRY : {entry}")
     lines.append(f"👉 ДОБОР : {dobar_low} — {dobar_high}")
     if stop_loss:
         lines.append(f"🛑 СТОП : {stop_loss}")
+        
+        # Додаємо динамічні розрахунки ризиків
+        risk_usd, pos_usd, pos_contracts = calculate_position_size(entry, stop_loss)
+        if pos_usd > 0:
+            lines.append(f"")
+            lines.append(f"⚖️ <b>РИЗИК-МЕНЕДЖМЕНТ:</b>")
+            lines.append(f"💵 Макс. Ризик: <b>${risk_usd}</b>")
+            lines.append(f"💼 Реком. Об'єм: <b>${pos_usd}</b> (або {pos_contracts:.1f} {symbol[:-4]})")
+            
     lines.append(f"")
 
     tp_labels_list = ['TP1', 'TP2', 'TP3', 'TP4']
@@ -231,19 +295,78 @@ def format_signal(symbol, timeframe, direction, entry, dobar_low, dobar_high, tp
     if stats['count'] > 0:
         lines.append(f"📊 {stats['count']} сигналів")
         lines.append(f"📉 Середнє відхилення: {stats['avg_dev']}%")
-        for dev, cnt in stats['deviations'].items():
+        deviations = stats.get('deviations', {})
+        for dev, cnt in deviations.items():
             lines.append(f"📉 Відхилення ≥ {dev}%: {cnt}")
 
     return "\n".join(lines)
 
-async def monitor_signal(bot, signal):
+
+# ─────────────────────────────────────────────
+# SETTINGS MENU HELPERS
+# ─────────────────────────────────────────────
+
+def main_menu_keyboard():
+    return {
+        'inline_keyboard': [
+            [{'text': '📊 Статистика', 'callback_data': 'stats'}],
+            [{'text': '⏳ Активні сигнали', 'callback_data': 'active'}],
+            [{'text': '⚙️ Налаштування', 'callback_data': 'cfg_main'}],
+            [{'text': 'ℹ️ Про бота', 'callback_data': 'info'}],
+            [{'text': '🗑 Очистити статистику', 'callback_data': 'clear'}],
+            [{'text': '🔴 Закрити всі сигнали', 'callback_data': 'clear_active'}],
+        ]
+    }
+
+def filters_text_private():
+    htf = get_setting('htf_bias_enabled')
+    min_prob = get_setting('min_tp1_prob')
+    htf_thresh = get_setting('htf_diff_threshold')
+    return (
+        f"🔍 Фільтри стратегій\n\n"
+        f"HTF bias фільтр: {'увімк.' if htf else 'вимк.'}\n"
+        f"Мін. ймовірність TP1: {min_prob}%\n"
+        f"HTF поріг (різниця EMA): {htf_thresh}%\n\n"
+        f"Використовуй ➖/➕ для зміни"
+    )
+
+def get_timeframe_keyboard(current):
+    options = ['all', '5m', '15m', '30m', '1h', '4h', '1d']
+    labels = {
+        'all': '🌐 Всі', '5m': '5m', '15m': '15m',
+        '30m': '30m', '1h': '1h', '4h': '4h', '1d': '1d'
+    }
+    keyboard = []
+    row = []
+    for opt in options:
+        mark = '✅ ' if opt == current else ''
+        row.append({'text': f'{mark}{labels[opt]}', 'callback_data': f'tf_{opt}'})
+        if len(row) == 3:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([{'text': '🔙 Назад', 'callback_data': 'back'}])
+    return keyboard
+
+
+# ─────────────────────────────────────────────
+# SIGNAL MONITORING
+# ─────────────────────────────────────────────
+
+async def monitor_signal(bot, signal, active_signals):
     symbol = signal['symbol']
     direction = signal['direction']
     tps = signal['tps']
-    hit_tps = set()
+    
+    # Відновлюємо стан досягнутих ТР
+    hit_tps = set(signal.get('hit_tps', []))
+    
     chart_message_id = signal['chart_message_id']
     start_time = asyncio.get_event_loop().time()
-    breakeven = False
+    
+    # Відновлюємо стан беззбитку
+    breakeven = 0 in hit_tps
 
     ccxt_symbol = symbol[:-4] + '/USDT' if symbol.endswith('USDT') else symbol
     print(f"Моніторинг {symbol} {signal['timeframe']} {direction}...")
@@ -274,7 +397,6 @@ async def monitor_signal(bot, signal):
 
             if sl_hit:
                 elapsed = elapsed_str()
-
                 total_profit = 0.0
                 tp_summary_lines = []
                 for i in sorted(hit_tps):
@@ -288,60 +410,41 @@ async def monitor_signal(bot, signal):
                     f"",
                 ]
 
-                # Якщо стоп переведено в БУ і є досягнуті TP — позитивний результат
                 if breakeven and hit_tps:
                     msg_lines.extend(tp_summary_lines)
                     msg_lines.append(f"")
                     msg_lines.append(f"↩️ Сигнал закрито в беззбиток ({elapsed})")
                     msg_lines.append(f"💰 Загальний прибуток: +{round(total_profit, 1)}%")
-
                     try:
-                        await bot.send_message(
-                            chat_id=CHAT_ID,
-                            text="\n".join(msg_lines),
-                            reply_to_message_id=chart_message_id
-                        )
+                        await bot.send_message(chat_id=CHAT_ID, text="\n".join(msg_lines),
+                                               reply_to_message_id=chart_message_id, parse_mode='HTML')
                     except Exception as e:
                         print(f"Помилка відправки БУ {symbol}: {e}")
-
-                    await close_signal(signal.get('stat_id'), 'tp', round(total_profit, 1))
-                    await remove_active(symbol, signal['timeframe'])
-                    break
-
+                    close_signal_stat(signal.get('stat_id'), 'tp', round(total_profit, 1))
                 else:
-                    # Справжній стоп без жодного TP
                     sl_pct = round(abs(price - entry) / entry * 100, 1)
                     msg_lines.append(f"🛑 Stop-Loss спрацював ({elapsed}) | -{sl_pct}%")
                     msg_lines.append(f"💸 TP не було досягнуто")
                     msg_lines.append(f"❌ Сигнал закрито по стопу")
-
                     try:
-                        await bot.send_message(
-                            chat_id=CHAT_ID,
-                            text="\n".join(msg_lines),
-                            reply_to_message_id=chart_message_id
-                        )
+                        await bot.send_message(chat_id=CHAT_ID, text="\n".join(msg_lines),
+                                               reply_to_message_id=chart_message_id, parse_mode='HTML')
                     except Exception as e:
                         print(f"Помилка відправки СЛ {symbol}: {e}")
+                    close_signal_stat(signal.get('stat_id'), 'sl', -sl_pct)
 
-                    await close_signal(signal.get('stat_id'), 'sl', -sl_pct)
-                    await remove_active(symbol, signal['timeframe'])
-                    break
+                remove_active_signal(symbol, signal['timeframe'])
+                break
 
-        # Перевірка БУ після TP1 — ціна повернулась до входу
+        # Перевірка БУ після TP1
         if breakeven and 0 in hit_tps:
             be_hit = (direction == 'SHORT' and price >= entry) or \
                      (direction == 'LONG' and price <= entry)
 
             if be_hit:
                 elapsed = elapsed_str()
-
-                total_profit = 0.0
-                tp_summary_lines = []
-                for i in sorted(hit_tps):
-                    tp_pct_i = tps[i][2]
-                    total_profit += tp_pct_i
-                    tp_summary_lines.append(f"✅ TP{i+1}: {tps[i][0]} | +{tp_pct_i}%")
+                total_profit = sum(tps[i][2] for i in hit_tps)
+                tp_summary_lines = [f"✅ TP{i+1}: {tps[i][0]} | +{tps[i][2]}%" for i in sorted(hit_tps)]
 
                 msg_lines = [
                     f"#{symbol} {signal['timeframe']} "
@@ -354,16 +457,13 @@ async def monitor_signal(bot, signal):
                 msg_lines.append(f"💰 Загальний прибуток: +{round(total_profit, 1)}%")
 
                 try:
-                    await bot.send_message(
-                        chat_id=CHAT_ID,
-                        text="\n".join(msg_lines),
-                        reply_to_message_id=chart_message_id
-                    )
+                    await bot.send_message(chat_id=CHAT_ID, text="\n".join(msg_lines),
+                                           reply_to_message_id=chart_message_id, parse_mode='HTML')
                 except Exception as e:
                     print(f"Помилка відправки БУ {symbol}: {e}")
 
-                await close_signal(signal.get('stat_id'), 'tp', round(total_profit, 1))
-                await remove_active(symbol, signal['timeframe'])
+                close_signal_stat(signal.get('stat_id'), 'tp', round(total_profit, 1))
+                remove_active_signal(symbol, signal['timeframe'])
                 break
 
         # Перевірка досягнення TP
@@ -376,6 +476,11 @@ async def monitor_signal(bot, signal):
 
         if new_hits - hit_tps:
             hit_tps = hit_tps | new_hits
+            
+            # Надійно фіксуємо ТР у базі даних
+            signal['hit_tps'] = hit_tps
+            save_active_signals(active_signals)
+            
             elapsed = elapsed_str()
             print(f"✅ {symbol} досягнуто TP: {hit_tps}")
 
@@ -383,6 +488,9 @@ async def monitor_signal(bot, signal):
                 breakeven = True
                 signal['stop_loss'] = entry
                 signal['show_dobar'] = False
+                
+                # Фіксуємо беззбиток у базі даних
+                save_active_signals(active_signals)
                 print(f"🔄 {symbol} стоп переведено в БУ: {entry}")
 
             new_text = format_signal(
@@ -399,35 +507,22 @@ async def monitor_signal(bot, signal):
                     generate_chart,
                     symbol, signal['timeframe'], direction,
                     signal['entry'], signal['dobar_low'], signal['dobar_high'],
-                    tps, list(hit_tps),
-                    signal.get('stop_loss'),
-                    signal.get('show_dobar', True),
-                    candles_df
+                    tps, list(hit_tps), signal.get('stop_loss'),
+                    signal.get('show_dobar', True), candles_df
                 )
                 await bot.send_photo(
-                    chat_id=CHAT_ID,
-                    photo=new_chart,
-                    caption=new_text,
+                    chat_id=CHAT_ID, photo=new_chart, caption=new_text,
                     reply_to_message_id=chart_message_id,
-                    read_timeout=30,
-                    write_timeout=30,
-                    connect_timeout=30,
+                    parse_mode='HTML',  # Вмикаємо рендер клікабельних посилань
+                    read_timeout=30, write_timeout=30, connect_timeout=30,
                 )
             except Exception as e:
                 print(f"Помилка відправки оновлення {symbol}: {e}")
 
-            # Всі TP досягнуті
             if len(hit_tps) == len(tps):
                 last_tp = max(hit_tps)
-                tp_price_final = tps[last_tp][0]
-                tp_pct_final = tps[last_tp][2]
                 total_profit = sum(tps[i][2] for i in hit_tps)
-
-                tp_summary_lines = []
-                for i in sorted(hit_tps):
-                    tp_summary_lines.append(
-                        f"✅ TP{i+1}: {tps[i][0]} | +{tps[i][2]}%"
-                    )
+                tp_summary_lines = [f"✅ TP{i+1}: {tps[i][0]} | +{tps[i][2]}%" for i in sorted(hit_tps)]
 
                 msg_lines = [
                     f"#{symbol} {signal['timeframe']} "
@@ -436,47 +531,49 @@ async def monitor_signal(bot, signal):
                 ]
                 msg_lines.extend(tp_summary_lines)
                 msg_lines.append(f"")
-                msg_lines.append(f"🎯 TP{last_tp+1}: {tp_price_final} ✅ ({elapsed})")
+                msg_lines.append(f"🎯 TP{last_tp+1}: {tps[last_tp][0]} ✅ ({elapsed})")
                 msg_lines.append(f"💰 Загальний прибуток: +{round(total_profit, 1)}%")
                 msg_lines.append(f"🏁 Сигнал закрито")
 
                 try:
-                    await bot.send_message(
-                        chat_id=CHAT_ID,
-                        text="\n".join(msg_lines),
-                        reply_to_message_id=chart_message_id
-                    )
+                    await bot.send_message(chat_id=CHAT_ID, text="\n".join(msg_lines),
+                                           reply_to_message_id=chart_message_id, parse_mode='HTML')
                 except Exception as e:
                     print(f"Помилка відправки закриття {symbol}: {e}")
 
-                await close_signal(signal.get('stat_id'), 'tp', round(total_profit, 1))
-                await remove_active(symbol, signal['timeframe'])
+                close_signal_stat(signal.get('stat_id'), 'tp', round(total_profit, 1))
+                remove_active_signal(symbol, signal['timeframe'])
                 break
 
+
+# ─────────────────────────────────────────────
+# SCAN & SEND
+# ─────────────────────────────────────────────
+
 async def scan_and_send(bot, active_signals, timeframes):
+    global recently_sent
     all_signals = await scan_all(timeframes)
     new_count = 0
+    max_signals = get_setting('max_active_signals')
 
     for signal in all_signals:
         if new_count >= 3:
             break
 
-        # 1. Створюємо "чистий" символ без слеша (BTCUSDT)
+        if len(active_signals) >= max_signals:
+            print(f"⚠️ Досягнуто ліміт активних сигналів ({max_signals})")
+            break
+
         symbol_clean = signal['symbol'].replace('/', '')
-        
-        # 2. Перевіряємо, чи є вже такий самий сигнал (символ + ТФ) в активних
-        # Ми перевіряємо і символ, і таймфрейм, щоб дозволити торгувати
-        # одну монету на різних ТФ (якщо хочеш), або заборонити (за бажанням)
-        
-        # Якщо хочеш дозволити лише ОДИН сигнал на монету незалежно від ТФ:
-        is_already_monitored = any(s['symbol'].replace('/', '') == symbol_clean for s in active_signals)
-        
-        if is_already_monitored:
+        is_already_monitored = any(
+            s['symbol'].replace('/', '') == symbol_clean for s in active_signals
+        )
+
+        if is_already_monitored or symbol_clean in recently_sent:
             print(f"⚠️ {symbol_clean} вже моніториться — пропускаємо")
             continue
 
         try:
-            # 3. Формуємо текст і графік
             signal_text = format_signal(
                 symbol_clean, signal['timeframe'],
                 signal['direction'], signal['entry'],
@@ -488,44 +585,38 @@ async def scan_and_send(bot, active_signals, timeframes):
 
             ccxt_symbol = symbol_clean[:-4] + '/USDT'
             candles_df = await get_candles_main(ccxt_symbol, signal['timeframe'])
-            
+
             chart = await asyncio.to_thread(
                 generate_chart,
                 symbol_clean, signal['timeframe'],
                 signal['direction'], signal['entry'],
                 signal['dobar_low'], signal['dobar_high'],
-                signal['tps'],[], signal.get('stop_loss'),
+                signal['tps'], [], signal.get('stop_loss'),
                 True, candles_df
             )
 
             sent = await bot.send_photo(
-                chat_id=CHAT_ID,
-                photo=chart,
-                caption=signal_text,
-                read_timeout=30,
-                write_timeout=30,
-                connect_timeout=30,
+                chat_id=CHAT_ID, photo=chart, caption=signal_text,
+                parse_mode='HTML',  # Клікабельні посилання в новому сигналі
+                read_timeout=30, write_timeout=30, connect_timeout=30,
             )
 
-            # 4. Додаємо в активні та зберігаємо
             signal['chart_message_id'] = sent.message_id
-            signal['symbol'] = symbol_clean # Зберігаємо "чистий" символ
-            
+            signal['symbol'] = symbol_clean
+
             active_signals.append(signal)
-            await save_active(active_signals)
+            recently_sent.add(symbol_clean)
+            save_active_signals(active_signals)
             new_count += 1
 
-            # 5. Статистика
-            signal_id = await add_signal(
-                symbol_clean,
-                signal['timeframe'],
-                signal['direction'],
-                signal['entry'],
+            signal_id = add_signal_stat(
+                symbol_clean, signal['timeframe'],
+                signal['direction'], signal['entry'],
                 signal.get('tier', '🟢')
             )
             signal['stat_id'] = signal_id
 
-            asyncio.create_task(monitor_signal(bot, signal))
+            asyncio.create_task(monitor_signal(bot, signal, active_signals))
             await asyncio.sleep(5)
 
         except Exception as e:
@@ -534,28 +625,14 @@ async def scan_and_send(bot, active_signals, timeframes):
 
     if new_count > 0:
         print(f"Відправлено {new_count} нових сигналів.")
-        
-def get_timeframe_keyboard(current):
-    options = ['all', '5m', '15m', '30m', '1h', '4h', '1d']
-    labels = {
-        'all': '🌐 Всі', '5m': '5m', '15m': '15m',
-        '30m': '30m', '1h': '1h', '4h': '4h', '1d': '1d'
-    }
-    keyboard = []
-    row = []
-    for opt in options:
-        mark = '✅ ' if opt == current else ''
-        row.append({'text': f'{mark}{labels[opt]}', 'callback_data': f'tf_{opt}'})
-        if len(row) == 3:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-    keyboard.append([{'text': '🔙 Назад', 'callback_data': 'back'}])
-    return keyboard
+
+
+# ─────────────────────────────────────────────
+# TELEGRAM UPDATE HANDLER
+# ─────────────────────────────────────────────
 
 async def handle_updates(bot, active_signals):
-    global active_timeframe
+    global active_timeframe, exchange
     offset = None
 
     while True:
@@ -564,36 +641,33 @@ async def handle_updates(bot, active_signals):
             for update in updates:
                 offset = update.update_id + 1
 
+                # ── Текстові команди ──────────────────────────
                 if update.message and update.message.text:
                     text = update.message.text
                     chat_id = update.message.chat.id
                     user_id = update.message.from_user.id
 
                     if str(user_id) != str(ADMIN_ID):
-                        await bot.send_message(
-                            chat_id=chat_id,
-                            text="⛔ Доступ заборонено"
-                        )
+                        await bot.send_message(chat_id=chat_id, text="⛔ Доступ заборонено")
                         continue
 
                     if text == '/start':
                         await bot.send_message(
                             chat_id=chat_id,
                             text="🤖 Сигнальний бот\nОберіть дію:",
-                            reply_markup={
-                                'inline_keyboard': [
-                                    [{'text': '📊 Статистика', 'callback_data': 'stats'}],
-                                    [{'text': '⏳ Активні сигнали', 'callback_data': 'active'}],
-                                    [{'text': '⏱ Таймфрейм', 'callback_data': 'timeframe'}],
-                                    [{'text': 'ℹ️ Про бота', 'callback_data': 'info'}],
-                                    [{'text': '🗑 Очистити статистику', 'callback_data': 'clear'}],
-                                    [{'text': '🔴 Закрити всі сигнали', 'callback_data': 'clear_active'}],
-                                ]
-                            }
+                            reply_markup=main_menu_keyboard()
+                        )
+
+                    elif text == '/settings':
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=get_settings_text(),
+                            reply_markup=main_settings_keyboard(),
+                            parse_mode='HTML'
                         )
 
                     elif text == '/stats':
-                        summary = await get_summary()
+                        summary = get_stats_summary()
                         await bot.send_message(chat_id=chat_id, text=summary)
 
                     elif text == '/active':
@@ -610,24 +684,32 @@ async def handle_updates(bot, active_signals):
                             msg = "\n".join(lines)
                         await bot.send_message(chat_id=chat_id, text=msg)
 
+                # ── Callback кнопки ───────────────────────────
                 if update.callback_query:
                     query = update.callback_query
                     chat_id = query.message.chat.id
                     user_id = query.from_user.id
+                    data = query.data
 
                     if str(user_id) != str(ADMIN_ID):
-                        await bot.answer_callback_query(
-                            query.id, text="⛔ Доступ заборонено"
-                        )
+                        await bot.answer_callback_query(query.id, text="⛔ Доступ заборонено")
                         continue
 
                     await bot.answer_callback_query(query.id)
 
-                    if query.data == 'stats':
-                        summary = await get_summary()
+                    # ── Головне меню ──
+                    if data == 'back' or data == 'cfg_back':
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text="🤖 Сигнальний бот\nОберіть дію:",
+                            reply_markup=main_menu_keyboard()
+                        )
+
+                    elif data == 'stats':
+                        summary = get_stats_summary()
                         await bot.send_message(chat_id=chat_id, text=summary)
 
-                    elif query.data == 'active':
+                    elif data == 'active':
                         if not active_signals:
                             msg = "⏳ Активних сигналів немає"
                         else:
@@ -641,59 +723,263 @@ async def handle_updates(bot, active_signals):
                             msg = "\n".join(lines)
                         await bot.send_message(chat_id=chat_id, text=msg)
 
-                    elif query.data == 'timeframe':
-                        await bot.send_message(
-                            chat_id=chat_id,
-                            text=f"⏱ Поточний таймфрейм: {active_timeframe}\nОберіть таймфрейм:",
-                            reply_markup={
-                                'inline_keyboard': get_timeframe_keyboard(active_timeframe)
-                            }
-                        )
-
-                    elif query.data.startswith('tf_'):
-                        tf = query.data.replace('tf_', '')
-                        active_timeframe = tf
-                        set_setting('active_timeframe', tf)
-                        print(f"⏱ Таймфрейм змінено на: {tf}")
-
-                        await bot.send_message(
-                            chat_id=chat_id,
-                            text=f"✅ Таймфрейм змінено на: {tf}\n"
-                                 f"Сканування: {TIMEFRAME_OPTIONS.get(tf, [tf])}\n"
-                                 f"⏳ Запускаю сканування...",
-                            reply_markup={
-                                'inline_keyboard': get_timeframe_keyboard(active_timeframe)
-                            }
-                        )
-
-                        # Одразу запускаємо сканування на новому таймфреймі
-                        try:
-                            timeframes_to_scan = TIMEFRAME_OPTIONS.get(tf, [tf])
-                            await scan_and_send(bot, active_signals, timeframes_to_scan)
-                            await bot.send_message(
-                                chat_id=chat_id,
-                                text="✅ Сканування завершено!"
-                            )
-                        except Exception as e:
-                            print(f"Помилка сканування після зміни таймфрейму: {e}")
-                            await bot.send_message(
-                                chat_id=chat_id,
-                                text=f"❌ Помилка сканування: {e}"
-                            )
-
-                    elif query.data == 'info':
+                    elif data == 'info':
+                        htf = get_setting('htf_bias_enabled')
+                        min_prob = get_setting('min_tp1_prob')
+                        stop_mult = get_setting('stop_atr_mult')
                         msg = (
-                            "🤖 Сигнальний бот\n\n"
-                            "📊 Біржа: Binance Futures\n"
-                            "⏱ Таймфрейми: 5m · 15m · 30m · 1h · 4h · 1d\n"
-                            "🔍 Індикатори: EMA20 · EMA50 · RSI · ATR\n"
-                            "✅ Фільтр: TP1 ≥ 60% · мін. 15 угод\n"
-                            "🛑 Стоп-лосс: ATR × 2.0\n"
-                            "↩️ БУ: після досягнення TP1\n"
+                            f"🤖 Сигнальний бот\n\n"
+                            f"📊 Біржа: Binance / MEXC Futures\n"
+                            f"⏱ Таймфрейми: 5m · 15m · 30m · 1h · 4h · 1d\n"
+                            f"🔍 Індикатори: EMA · RSI · ATR · MACD · BB\n"
+                            f"✅ Фільтр: TP1 ≥ {min_prob}% · мін. 12 угод\n"
+                            f"🛑 Стоп-лосс: ATR × {stop_mult}\n"
+                            f"↩️ БУ: після досягнення TP1\n"
+                            f"🔍 HTF фільтр: {'увімк.' if htf else 'вимк.'}"
                         )
                         await bot.send_message(chat_id=chat_id, text=msg)
 
-                    elif query.data == 'clear':
+                    elif data == 'timeframe':
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=f"⏱ Поточний таймфрейм: {active_timeframe}\nОберіть таймфрейм:",
+                            reply_markup={'inline_keyboard': get_timeframe_keyboard(active_timeframe)}
+                        )
+
+                    elif data.startswith('tf_'):
+                        tf = data.replace('tf_', '')
+                        active_timeframe = tf
+                        set_setting('active_timeframe', tf)
+                        print(f"⏱ Таймфрейм змінено на: {tf}")
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=f"✅ Таймфрейм змінено на: {tf}\n⏳ Запускаю сканування...",
+                            reply_markup={'inline_keyboard': get_timeframe_keyboard(active_timeframe)}
+                        )
+                        try:
+                            timeframes_to_scan = TIMEFRAME_OPTIONS.get(tf, [tf])
+                            await scan_and_send(bot, active_signals, timeframes_to_scan)
+                            await bot.send_message(chat_id=chat_id, text="✅ Сканування завершено!")
+                        except Exception as e:
+                            print(f"Помилка сканування після зміни таймфрейму: {e}")
+                            await bot.send_message(chat_id=chat_id, text=f"❌ Помилка сканування: {e}")
+
+                    # ── Налаштування — Меню ──
+                    elif data == 'cfg_main':
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=get_settings_text(),
+                            reply_markup=main_settings_keyboard(),
+                            parse_mode='HTML'
+                        )
+
+                    elif data == 'cfg_pairs':
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text="📋 Оберіть активні пари для сканування:",
+                            reply_markup=pairs_keyboard()
+                        )
+
+                    elif data == 'cfg_timeframes':
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text="⏱ Оберіть активні таймфрейми:",
+                            reply_markup=timeframes_keyboard()
+                        )
+
+                    elif data == 'cfg_risk':
+                        text, markup = risk_keyboard()
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=text,
+                            reply_markup=markup,
+                            parse_mode='HTML'
+                        )
+
+                    elif data == 'cfg_filters':
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=filters_text_private(),
+                            reply_markup=filters_keyboard()
+                        )
+
+                    elif data == 'cfg_close':
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text="⚙️ Меню налаштувань закрито."
+                        )
+
+                    # ── Гаряча зміна активної біржі в реальному часі (Binance <-> MEXC) ──
+                    elif data == 'toggle_exchange':
+                        current = get_setting('exchange_name') or 'binance'
+                        new_exchange = 'mexc' if current == 'binance' else 'binance'
+                        set_setting('exchange_name', new_exchange)
+                        
+                        # Безпечно закриваємо стару асинхронну сесію сокетів перед заміною
+                        try:
+                            if hasattr(scanner, 'exchange') and scanner.exchange:
+                                # Створюємо фонове завдання для очищення сокетів
+                                asyncio.create_task(scanner.exchange.close())
+                        except Exception as e:
+                            print(f"Помилка закриття старої сесії: {e}")
+                        
+                        # Гаряче оновлення клієнтів на нову біржу в реальному часі
+                        exchange = get_exchange_client(async_mode=False)
+                        scanner.exchange = get_exchange_client(async_mode=True)
+                        print(f"🏛 Біржу успішно перемикнуто на: {new_exchange.upper()}")
+                        
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=get_settings_text(),
+                            reply_markup=main_settings_keyboard(),
+                            parse_mode='HTML'
+                        )
+
+                    # ── Перемикання пар ──
+                    elif data.startswith('toggle_pair_'):
+                        pair = data.replace('toggle_pair_', '')
+                        watchlist = get_setting('watchlist')
+                        if pair in watchlist:
+                            if len(watchlist) > 1:
+                                watchlist.remove(pair)
+                        else:
+                            watchlist.append(pair)
+                        set_setting('watchlist', watchlist)
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text="📋 Оновлено список пар:",
+                            reply_markup=pairs_keyboard()
+                        )
+
+                    # ── Перемикання таймфреймів ──
+                    elif data.startswith('toggle_tf_'):
+                        tf = data.replace('toggle_tf_', '')
+                        tfs = get_setting('active_timeframes')
+                        if tf in tfs:
+                            if len(tfs) > 1:
+                                tfs.remove(tf)
+                        else:
+                            tfs.append(tf)
+                        set_setting('active_timeframes', tfs)
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text="⏱ Оновлено таймфрейми:",
+                            reply_markup=timeframes_keyboard()
+                        )
+
+                    # ── Ризик-менеджмент ──
+                    elif data == 'risk_stop_up':
+                        v = round(get_setting('stop_atr_mult') + 0.1, 1)
+                        set_setting('stop_atr_mult', min(v, 5.0))
+                        text, markup = risk_keyboard()
+                        await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
+
+                    elif data == 'risk_stop_down':
+                        v = round(get_setting('stop_atr_mult') - 0.1, 1)
+                        set_setting('stop_atr_mult', max(v, 0.5))
+                        text, markup = risk_keyboard()
+                        await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
+
+                    elif data == 'risk_tp1_up':
+                        v = round(get_setting('tp1_atr_mult') + 0.1, 1)
+                        set_setting('tp1_atr_mult', min(v, 3.0))
+                        text, markup = risk_keyboard()
+                        await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
+
+                    elif data == 'risk_tp1_down':
+                        v = round(get_setting('tp1_atr_mult') - 0.1, 1)
+                        set_setting('tp1_atr_mult', max(v, 0.3))
+                        text, markup = risk_keyboard()
+                        await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
+
+                    elif data == 'risk_max_up':
+                        v = get_setting('max_active_signals') + 1
+                        set_setting('max_active_signals', min(v, 30))
+                        text, markup = risk_keyboard()
+                        await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
+
+                    elif data == 'risk_max_down':
+                        v = get_setting('max_active_signals') - 1
+                        set_setting('max_active_signals', max(v, 1))
+                        text, markup = risk_keyboard()
+                        await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
+
+                    # Нові кнопки налаштування депозиту та ризику %
+                    elif data == 'risk_depo_up':
+                        v = (get_setting('portfolio_size') or 1000.0) + 100.0
+                        set_setting('portfolio_size', min(v, 1000000.0))
+                        text, markup = risk_keyboard()
+                        await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
+
+                    elif data == 'risk_depo_down':
+                        v = (get_setting('portfolio_size') or 1000.0) - 100.0
+                        set_setting('portfolio_size', max(v, 100.0))
+                        text, markup = risk_keyboard()
+                        await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
+
+                    elif data == 'risk_pct_up':
+                        v = round((get_setting('risk_pct') or 1.0) + 0.1, 1)
+                        set_setting('risk_pct', min(v, 10.0))
+                        text, markup = risk_keyboard()
+                        await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
+
+                    elif data == 'risk_pct_down':
+                        v = round((get_setting('risk_pct') or 1.0) - 0.1, 1)
+                        set_setting('risk_pct', max(v, 0.1))
+                        text, markup = risk_keyboard()
+                        await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
+
+                    elif data in ['risk_stop_info', 'risk_tp1_info', 'risk_max_info', 'risk_depo_info', 'risk_pct_info', 'filter_prob_info', 'filter_htf_info']:
+                        pass  # інформаційні кнопки
+
+                    # ── Фільтри стратегій ──
+                    elif data == 'toggle_htf':
+                        current = get_setting('htf_bias_enabled')
+                        set_setting('htf_bias_enabled', not current)
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=filters_text_private(),
+                            reply_markup=filters_keyboard()
+                        )
+
+                    elif data == 'filter_prob_up':
+                        v = get_setting('min_tp1_prob') + 5
+                        set_setting('min_tp1_prob', min(v, 90))
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=filters_text_private(),
+                            reply_markup=filters_keyboard()
+                        )
+
+                    elif data == 'filter_prob_down':
+                        v = get_setting('min_tp1_prob') - 5
+                        set_setting('min_tp1_prob', max(v, 30))
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=filters_text_private(),
+                            reply_markup=filters_keyboard()
+                        )
+
+                    elif data == 'filter_htf_up':
+                        v = round(get_setting('htf_diff_threshold') + 0.5, 1)
+                        set_setting('htf_diff_threshold', min(v, 5.0))
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=filters_text_private(),
+                            reply_markup=filters_keyboard()
+                        )
+
+                    elif data == 'filter_htf_down':
+                        v = round(get_setting('htf_diff_threshold') - 0.5, 1)
+                        set_setting('htf_diff_threshold', max(v, 0.1))
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=filters_text_private(),
+                            reply_markup=filters_keyboard()
+                        )
+
+                    # ── Очищення статистики ──
+                    elif data == 'clear':
                         await bot.send_message(
                             chat_id=chat_id,
                             text="⚠️ Ви впевнені що хочете очистити статистику?",
@@ -707,20 +993,15 @@ async def handle_updates(bot, active_signals):
                             }
                         )
 
-                    elif query.data == 'clear_confirm':
-                        await clear_stats()
-                        await bot.send_message(
-                            chat_id=chat_id,
-                            text="✅ Статистику очищено!"
-                        )
+                    elif data == 'clear_confirm':
+                        clear_stats()
+                        await bot.send_message(chat_id=chat_id, text="✅ Статистику очищено!")
 
-                    elif query.data == 'clear_cancel':
-                        await bot.send_message(
-                            chat_id=chat_id,
-                            text="❌ Очищення скасовано"
-                        )
+                    elif data == 'clear_cancel':
+                        await bot.send_message(chat_id=chat_id, text="❌ Очищення скасовано")
 
-                    elif query.data == 'clear_active':
+                    # ── Закрити всі сигнали ──
+                    elif data == 'clear_active':
                         await bot.send_message(
                             chat_id=chat_id,
                             text="⚠️ Закрити всі активні сигнали?",
@@ -734,150 +1015,161 @@ async def handle_updates(bot, active_signals):
                             }
                         )
 
-                    elif query.data == 'clear_active_confirm':
-                        await clear_active()
+                    elif data == 'clear_active_confirm':
+                        clear_active_signals()
                         active_signals.clear()
-                        await bot.send_message(
-                            chat_id=chat_id,
-                            text="✅ Всі активні сигнали закрито!"
-                        )
+                        await bot.send_message(chat_id=chat_id, text="✅ Всі активні сигнали закрито!")
 
-                    elif query.data == 'clear_active_cancel':
-                        await bot.send_message(
-                            chat_id=chat_id,
-                            text="❌ Скасовано"
-                        )
-
-                    elif query.data == 'back':
-                        await bot.send_message(
-                            chat_id=chat_id,
-                            text="🤖 Сигнальний бот\nОберіть дію:",
-                            reply_markup={
-                                'inline_keyboard': [
-                                    [{'text': '📊 Статистика', 'callback_data': 'stats'}],
-                                    [{'text': '⏳ Активні сигнали', 'callback_data': 'active'}],
-                                    [{'text': '⏱ Таймфрейм', 'callback_data': 'timeframe'}],
-                                    [{'text': 'ℹ️ Про бота', 'callback_data': 'info'}],
-                                    [{'text': '🗑 Очистити статистику', 'callback_data': 'clear'}],
-                                    [{'text': '🔴 Закрити всі сигнали', 'callback_data': 'clear_active'}],
-                                ]
-                            }
-                        )
+                    elif data == 'clear_active_cancel':
+                        await bot.send_message(chat_id=chat_id, text="❌ Скасовано")
 
         except Exception as e:
             print(f"Помилка обробки оновлень: {e}")
             await asyncio.sleep(5)
 
+
+# ─────────────────────────────────────────────
+# MAIN LOOP
+# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# MAIN LOOP
+# ─────────────────────────────────────────────
+
+import time
+
+async def wait_until_next_boundary(interval_seconds):
+    """Очікує точного закриття свічки на Binance з невеликим зазором для оновлення даних"""
+    now = time.time()
+    remaining = interval_seconds - (now % interval_seconds)
+    # Додаємо 1 секунду зазору, щоб свічка точно встигла закритися
+    await asyncio.sleep(remaining + 1.0)
+
 async def main():
     global active_timeframe
+    init_db()
     bot = Bot(token=BOT_TOKEN, request=request)
 
-    active_signals = await load_active()
+    active_signals = load_active_signals()
     print(f"Завантажено {len(active_signals)} активних сигналів з диску")
 
     for signal in active_signals:
         if signal.get('chart_message_id'):
-            asyncio.create_task(monitor_signal(bot, signal))
+            asyncio.create_task(monitor_signal(bot, signal, active_signals))
             print(f"🔄 Відновлено моніторинг: {signal['symbol']} {signal['timeframe']}")
-
-            # Якщо немає stat_id — додаємо в статистику
             if not signal.get('stat_id'):
-                signal_id = await add_signal(
-                    signal['symbol'],
-                    signal['timeframe'],
-                    signal['direction'],
-                    signal['entry'],
+                signal_id = add_signal_stat(
+                    signal['symbol'], signal['timeframe'],
+                    signal['direction'], signal['entry'],
                     signal.get('tier', '🟢')
                 )
                 signal['stat_id'] = signal_id
-                print(f"📊 Додано в статистику: {signal['symbol']} {signal['timeframe']}")
 
-    # Зберігаємо оновлені stat_id
-    await save_active(active_signals)
-
-    # Синхронізуємо кількість активних в статистиці
-    stats = await load_stats()
-    stats['active'] = len(active_signals)
-    await save_stats(stats)
-    print(f"📊 Синхронізовано статистику: {len(active_signals)} активних")
+    save_active_signals(active_signals)
 
     async def loop_5m():
         while True:
             try:
-                if active_timeframe in ('all', '5m'):
+                tfs = get_setting('active_timeframes')
+                if '5m' in tfs:
+                    await wait_until_next_boundary(300)
                     print("Сканування 5m...")
                     await scan_and_send(bot, active_signals, ['5m'])
+                else:
+                    await asyncio.sleep(30)
             except Exception as e:
                 print(f"Помилка loop_5m: {e}")
-            await asyncio.sleep(5 * 60)
+                await asyncio.sleep(10)
 
     async def loop_15m():
         while True:
             try:
-                if active_timeframe in ('all', '15m'):
+                tfs = get_setting('active_timeframes')
+                if '15m' in tfs:
+                    await wait_until_next_boundary(900)
                     print("Сканування 15m...")
                     await scan_and_send(bot, active_signals, ['15m'])
+                else:
+                    await asyncio.sleep(30)
             except Exception as e:
                 print(f"Помилка loop_15m: {e}")
-            await asyncio.sleep(15 * 60)
+                await asyncio.sleep(10)
 
     async def loop_30m():
         while True:
             try:
-                if active_timeframe in ('all', '30m'):
+                tfs = get_setting('active_timeframes')
+                if '30m' in tfs:
+                    await wait_until_next_boundary(1800)
                     print("Сканування 30m...")
                     await scan_and_send(bot, active_signals, ['30m'])
+                else:
+                    await asyncio.sleep(30)
             except Exception as e:
                 print(f"Помилка loop_30m: {e}")
-            await asyncio.sleep(30 * 60)
+                await asyncio.sleep(10)
 
     async def loop_1h():
         while True:
             try:
-                if active_timeframe in ('all', '1h'):
+                tfs = get_setting('active_timeframes')
+                if '1h' in tfs:
+                    await wait_until_next_boundary(3600)
                     print("Сканування 1h...")
                     await scan_and_send(bot, active_signals, ['1h'])
+                else:
+                    await asyncio.sleep(30)
             except Exception as e:
                 print(f"Помилка loop_1h: {e}")
-            await asyncio.sleep(30 * 60)
+                await asyncio.sleep(10)
 
     async def loop_4h():
         while True:
             try:
-                if active_timeframe in ('all', '4h'):
+                tfs = get_setting('active_timeframes')
+                if '4h' in tfs:
+                    await wait_until_next_boundary(14400)
                     print("Сканування 4h...")
                     await scan_and_send(bot, active_signals, ['4h'])
+                else:
+                    await asyncio.sleep(30)
             except Exception as e:
                 print(f"Помилка loop_4h: {e}")
-            await asyncio.sleep(60 * 60)
+                await asyncio.sleep(10)
 
     async def loop_1d():
         while True:
             try:
-                if active_timeframe in ('all', '1d'):
+                tfs = get_setting('active_timeframes')
+                if '1d' in tfs:
+                    await wait_until_next_boundary(86400)
                     print("Сканування 1d...")
                     await scan_and_send(bot, active_signals, ['1d'])
+                else:
+                    await asyncio.sleep(30)
             except Exception as e:
                 print(f"Помилка loop_1d: {e}")
-            await asyncio.sleep(4 * 60 * 60)
+                await asyncio.sleep(10)
 
     async def daily_stats():
         while True:
             await asyncio.sleep(24 * 60 * 60)
-            summary = await get_summary()
+            summary = get_stats_summary()
             try:
                 await bot.send_message(chat_id=CHAT_ID, text=summary)
             except Exception as e:
                 print(f"Помилка відправки статистики: {e}")
 
+    async def clear_recently_sent():
+        global recently_sent
+        while True:
+            await asyncio.sleep(60 * 60)
+            recently_sent.clear()
+            print("🔄 Очищено recently_sent")
+
     await asyncio.gather(
-        loop_5m(),
-        loop_15m(),
-        loop_30m(),
-        loop_1h(),
-        loop_4h(),
-        loop_1d(),
-        daily_stats(),
+        loop_5m(), loop_15m(), loop_30m(),
+        loop_1h(), loop_4h(), loop_1d(),
+        daily_stats(), clear_recently_sent(),
         handle_updates(bot, active_signals),
     )
 

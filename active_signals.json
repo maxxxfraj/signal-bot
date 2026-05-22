@@ -1,101 +1,316 @@
 [
   {
-    "symbol": "ETHUSDT",
-    "timeframe": "5m",
+    "symbol": "BTCUSDT",
+    "timeframe": "1h",
     "direction": "SHORT",
-    "entry": 2125.65,
-    "dobar_low": 2127.995346,
-    "dobar_high": 2132.686038,
+    "entry": 77248.46,
+    "dobar_low": 77425.229617,
+    "dobar_high": 77778.768852,
     "tps": [
       [
-        2121.897447,
-        94,
-        0.2
-      ],
-      [
-        2119.552101,
-        24,
-        0.3
-      ],
-      [
-        2116.268617,
-        8,
+        76965.628613,
+        79,
         0.4
       ],
       [
-        2111.577925,
-        0,
-        0.7
-      ]
-    ],
-    "stats": {
-      "count": 51,
-      "avg_dev": 0.2,
-      "deviations": {
-        "1": 1,
-        "2": 1
-      },
-      "tp_probs": [
-        94,
-        24,
-        8,
-        0
-      ],
-      "is_valid": true
-    },
-    "tier": "🟢",
-    "stop_loss": 2135.031383,
-    "show_dobar": true,
-    "chart_message_id": 1298,
-    "stat_id": 1
-  },
-  {
-    "symbol": "LINKUSDT",
-    "timeframe": "5m",
-    "direction": "SHORT",
-    "entry": 9.571,
-    "dobar_low": 9.585302,
-    "dobar_high": 9.613907,
-    "tps": [
-      [
-        9.548116,
-        89,
-        0.2
-      ],
-      [
-        9.533814,
-        26,
-        0.4
-      ],
-      [
-        9.513791,
-        6,
+        76788.858995,
+        30,
         0.6
       ],
       [
-        9.485187,
-        0,
+        76541.381531,
+        16,
         0.9
+      ],
+      [
+        76187.842297,
+        8,
+        1.4
       ]
     ],
     "stats": {
-      "count": 35,
-      "avg_dev": 0.3,
+      "count": 80,
+      "avg_dev": 1.0,
       "deviations": {
-        "1": 2
+        "1": 26,
+        "2": 11,
+        "3": 5
       },
       "tp_probs": [
-        89,
-        26,
+        79,
+        30,
+        16,
+        8
+      ],
+      "is_valid": true
+    },
+    "tier": "🟢",
+    "stop_loss": 77955.538469,
+    "show_dobar": true,
+    "chart_message_id": 1701,
+    "stat_id": 1
+  },
+  {
+    "symbol": "BNBUSDT",
+    "timeframe": "1d",
+    "direction": "LONG",
+    "entry": 648.08,
+    "dobar_low": 621.803306,
+    "dobar_high": 639.321102,
+    "tps": [
+      [
+        662.094237,
+        74,
+        2.2
+      ],
+      [
+        670.853135,
+        25,
+        3.5
+      ],
+      [
+        683.115592,
         6,
+        5.4
+      ],
+      [
+        700.633388,
+        1,
+        8.1
+      ]
+    ],
+    "stats": {
+      "count": 106,
+      "avg_dev": 7.9,
+      "deviations": {
+        "1": 82,
+        "2": 59,
+        "3": 51,
+        "5": 35,
+        "10": 27
+      },
+      "tp_probs": [
+        74,
+        25,
+        6,
+        1
+      ],
+      "is_valid": true
+    },
+    "tier": "🟢",
+    "stop_loss": 613.044408,
+    "show_dobar": true,
+    "chart_message_id": 1703,
+    "stat_id": 3
+  },
+  {
+    "symbol": "ETCUSDT",
+    "timeframe": "4h",
+    "direction": "SHORT",
+    "entry": 8.92,
+    "dobar_low": 9.004294,
+    "dobar_high": 9.172882,
+    "tps": [
+      [
+        8.785129,
+        75,
+        1.5
+      ],
+      [
+        8.700835,
+        34,
+        2.5
+      ],
+      [
+        8.582824,
+        11,
+        3.8
+      ],
+      [
+        8.414235,
+        1,
+        5.7
+      ]
+    ],
+    "stats": {
+      "count": 110,
+      "avg_dev": 3.8,
+      "deviations": {
+        "1": 74,
+        "2": 57,
+        "3": 40,
+        "5": 31,
+        "10": 13
+      },
+      "tp_probs": [
+        75,
+        34,
+        11,
+        1
+      ],
+      "is_valid": true
+    },
+    "tier": "🟢",
+    "stop_loss": 9.257176,
+    "show_dobar": true,
+    "chart_message_id": 1724,
+    "stat_id": 13
+  },
+  {
+    "symbol": "DOGEUSDT",
+    "timeframe": "1h",
+    "direction": "SHORT",
+    "entry": 0.10456,
+    "dobar_low": 0.104998,
+    "dobar_high": 0.105875,
+    "tps": [
+      [
+        0.103859,
+        72,
+        0.7
+      ],
+      [
+        0.10342,
+        21,
+        1.1
+      ],
+      [
+        0.102807,
+        6,
+        1.7
+      ],
+      [
+        0.10193,
+        5,
+        2.5
+      ]
+    ],
+    "stats": {
+      "count": 78,
+      "avg_dev": 1.7,
+      "deviations": {
+        "1": 37,
+        "2": 25,
+        "3": 16,
+        "5": 7,
+        "10": 1
+      },
+      "tp_probs": [
+        72,
+        21,
+        6,
+        5
+      ],
+      "is_valid": true
+    },
+    "tier": "🟢",
+    "stop_loss": 0.106313,
+    "show_dobar": true,
+    "chart_message_id": 1748,
+    "stat_id": 17
+  },
+  {
+    "symbol": "XRPUSDT",
+    "timeframe": "4h",
+    "direction": "SHORT",
+    "entry": 1.3616,
+    "dobar_low": 1.371121,
+    "dobar_high": 1.390162,
+    "tps": [
+      [
+        1.346367,
+        76,
+        1.1
+      ],
+      [
+        1.336847,
+        26,
+        1.8
+      ],
+      [
+        1.323518,
+        7,
+        2.8
+      ],
+      [
+        1.304477,
+        0,
+        4.2
+      ]
+    ],
+    "stats": {
+      "count": 116,
+      "avg_dev": 4.0,
+      "deviations": {
+        "1": 78,
+        "2": 52,
+        "3": 42,
+        "5": 32,
+        "10": 10
+      },
+      "tp_probs": [
+        76,
+        26,
+        7,
         0
       ],
       "is_valid": true
     },
     "tier": "🟢",
-    "stop_loss": 9.628209,
+    "stop_loss": 1.399682,
     "show_dobar": true,
-    "chart_message_id": 1299,
-    "stat_id": null
+    "chart_message_id": 1751,
+    "stat_id": 21
+  },
+  {
+    "symbol": "ETHUSDT",
+    "timeframe": "1h",
+    "direction": "LONG",
+    "entry": 2124.24,
+    "dobar_low": 2104.428866,
+    "dobar_high": 2117.636289,
+    "tps": [
+      [
+        2134.805938,
+        88,
+        0.5
+      ],
+      [
+        2141.409649,
+        29,
+        0.8
+      ],
+      [
+        2150.654845,
+        9,
+        1.2
+      ],
+      [
+        2163.862268,
+        8,
+        1.9
+      ]
+    ],
+    "stats": {
+      "count": 65,
+      "avg_dev": 0.8,
+      "deviations": {
+        "1": 12,
+        "2": 7,
+        "3": 6
+      },
+      "tp_probs": [
+        88,
+        29,
+        9,
+        8
+      ],
+      "is_valid": true
+    },
+    "tier": "🟢",
+    "stop_loss": 2097.825155,
+    "show_dobar": true,
+    "chart_message_id": 1764,
+    "stat_id": 24
   }
 ]
