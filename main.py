@@ -306,15 +306,18 @@ def format_signal(symbol, timeframe, direction, entry, dobar_low, dobar_high,
     lines.append(f"💎 СТАТУС : {direction} {dir_emoji}")
     lines.append(f"")
     
-    # Додаємо динамічні розрахунки ризиків з підтримкою Добіру
+    # Розраховуємо об'єми та середню точку входу
     risk_usd, pos_usd, pos_contracts, margin_required, is_averaged, avg_entry = calculate_position_size_v2(
         entry, stop_loss, dobar_low, dobar_high
     )
     
     if is_averaged:
+        # Рахуємо точну середину зони добору для відображення в Telegram
+        dobar_mid = round((dobar_low + dobar_high) / 2.0, 6)
+        
         lines.append(f"👉 ENTRY (Avg): <b>{avg_entry}</b>")
-        lines.append(f"👉 ДОБОР : {dobar_low} — {dobar_high}")
-        lines.append(f"ℹ️ <i>(50% на {entry} + 50% у середньому на Добір)</i>")
+        lines.append(f"👉 ДОБОР : {dobar_low} — {dobar_high} (Середина: <b>{dobar_mid}</b>)")
+        lines.append(f"ℹ️ <i>(50% на {entry} + 50% на {dobar_mid})</i>")
     else:
         lines.append(f"👉 ENTRY : {entry}")
         lines.append(f"👉 ДОБОР : {dobar_low} — {dobar_high}")
@@ -328,8 +331,9 @@ def format_signal(symbol, timeframe, direction, entry, dobar_low, dobar_high,
             lines.append(f"💵 Макс. Ризик: <b>${risk_usd}</b>")
             
             if is_averaged:
+                dobar_mid = round((dobar_low + dobar_high) / 2.0, 6)
                 lines.append(f"💼 Реком. Об'єм: <b>${pos_usd}</b> (або {pos_contracts:.1f} {symbol[:-4]})")
-                lines.append(f"💵 <i>-> ${pos_usd/2:.2f} на вхід + ${pos_usd/2:.2f} на добір</i>")
+                lines.append(f"💵 <i>-> ${pos_usd/2:.2f} на {entry} + ${pos_usd/2:.2f} на {dobar_mid}</i>")
             else:
                 lines.append(f"💼 Реком. Об'єм: <b>${pos_usd}</b> (або {pos_contracts:.1f} {symbol[:-4]})")
                 
