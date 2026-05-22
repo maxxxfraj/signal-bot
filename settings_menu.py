@@ -64,7 +64,7 @@ def timeframes_keyboard():
 
 
 def risk_keyboard():
-    """Меню ризик-менеджменту (додано Депозит та % Ризику)"""
+    """Меню ризик-менеджменту (додано Депозит, Ризик %, Кредитне Плече та Добір)"""
     stop = get_setting('stop_atr_mult')
     tp1 = get_setting('tp1_atr_mult')
     max_sig = get_setting('max_active_signals')
@@ -72,6 +72,11 @@ def risk_keyboard():
     portfolio_size = get_setting('portfolio_size') or 1000.0
     risk_pct = get_setting('risk_pct') or 1.0
     risk_usd = portfolio_size * (risk_pct / 100.0)
+    
+    leverage = get_setting('leverage') or 20
+    use_dobar = get_setting('use_dobar')
+    if use_dobar is None:
+        use_dobar = True
 
     text = (
         f"🎯 Ризик-менеджмент\n\n"
@@ -81,6 +86,8 @@ def risk_keyboard():
         f"💰 Депозит: <b>${portfolio_size:.0f}</b>\n"
         f"💸 Ризик на угоду: <b>{risk_pct:.1f}%</b>\n"
         f"💵 Сума під ризиком: <b>${risk_usd:.2f}</b>\n"
+        f"⚡ Кредитне плече: <b>{leverage}x</b>\n"
+        f"↩️ Усереднення (Добір): <b>{'УВІМКНЕНО ✅' if use_dobar else 'ВИМКНЕНО ⬜'}</b>"
     )
     keyboard = [
         [
@@ -107,6 +114,17 @@ def risk_keyboard():
             InlineKeyboardButton("Ризик −", callback_data="risk_pct_down"),
             InlineKeyboardButton(f"{risk_pct:.1f}%", callback_data="risk_pct_info"),
             InlineKeyboardButton("Ризик +", callback_data="risk_pct_up"),
+        ],
+        [
+            InlineKeyboardButton("Плече −", callback_data="risk_lev_down"),
+            InlineKeyboardButton(f"{leverage}x", callback_data="risk_lev_info"),
+            InlineKeyboardButton("Плече +", callback_data="risk_lev_up"),
+        ],
+        [
+            InlineKeyboardButton(
+                f"{'🟢' if use_dobar else '⬜'} Усереднення (Добір)",
+                callback_data="toggle_dobar"
+            )
         ],
         [InlineKeyboardButton("◀️ Назад", callback_data="cfg_back")],
     ]
@@ -158,6 +176,10 @@ def get_settings_text():
     
     portfolio_size = get_setting('portfolio_size') or 1000.0
     risk_pct = get_setting('risk_pct') or 1.0
+    leverage = get_setting('leverage') or 20
+    use_dobar = get_setting('use_dobar')
+    if use_dobar is None:
+        use_dobar = True
     exchange_name = get_setting('exchange_name') or 'binance'
 
     return (
@@ -170,5 +192,5 @@ def get_settings_text():
         f"🔢 Мін. TP1 prob: {min_prob}%\n"
         f"🔍 HTF фільтр: {'увімк.' if htf else 'вимк.'}\n"
         f"📊 Макс. сигналів: {max_sig}\n"
-        f"💰 Депозит: ${portfolio_size:.0f} (Ризик {risk_pct:.1f}%)"
+        f"💰 Депозит: ${portfolio_size:.0f} (Ризик {risk_pct:.1f}% | {leverage}x | {'Добір' if use_dobar else 'Без добору'})"
     )

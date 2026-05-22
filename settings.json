@@ -31,7 +31,8 @@
   "htf_diff_threshold": 1.1,
   "stop_atr_mult": 2.0,
   "tp1_atr_mult": 0.8,
-  "max_active_signals": 20,
+  "max_active_signals": 25,
   "exchange_name": "binance",
-  "portfolio_size": 100.0
+  "portfolio_size": 100.0,
+  "leverage": 40
 }

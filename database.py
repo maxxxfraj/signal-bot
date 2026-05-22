@@ -2,21 +2,19 @@ import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from datetime import datetime
-from dotenv import load_dotenv  # Додаємо імпорт для завантаження оточення
+from dotenv import load_dotenv
+
+# Беремо посилання на базу з налаштувань системи (.env або Render)
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 def get_connection():
-    # Примусово завантажуємо .env перед зчитуванням змінних
     load_dotenv()
     database_url = os.getenv("DATABASE_URL")
     
     if not database_url:
         raise ValueError(
             "❌ КРИТИЧНА ПОМИЛКА: Не знайдено змінну DATABASE_URL!\n"
-            "Переконайтеся, що ви:\n"
-            "1. Створили безкоштовну базу на Neon.tech\n"
-            "2. Створили файл .env у папці вашого бота\n"
-            "3. Прописали туди рядок: DATABASE_URL=ваше_посилання_з_neon\n"
-            "4. Також додали цю змінну у вкладку Environment на Render."
+            "Переконайтеся, що ви прописали її у .env та Render."
         )
         
     conn = psycopg2.connect(database_url, sslmode='require')
@@ -34,13 +32,23 @@ def to_native_float(val):
 
 
 def to_native_int(val):
-    """Примусово конвертує any типи (включаючи numpy.int64) у стандартний int Python"""
+    """Примусово конвертує будь-які типи (включаючи numpy.int64) у стандартний int Python"""
     if val is None:
         return None
     try:
         return int(val)
     except Exception:
         return val
+
+
+def get_fees_for_exchange():
+    """Повертає точні комісії (Maker, Taker) для обраної біржі"""
+    from settings import get_setting
+    exchange_name = get_setting('exchange_name') or 'binance'
+    if exchange_name == 'mexc':
+        return 0.0001, 0.0004  # Maker 0.01%, Taker 0.04%
+    else:
+        return 0.0002, 0.0005  # Maker 0.02%, Taker 0.05%
 
 
 def init_db():
@@ -92,6 +100,15 @@ def init_db():
         )
     ''')
 
+    # Безпечні міграції PostgreSQL: додаємо колонки для трекінгу реального PnL та маржі, якщо їх немає
+    try:
+        cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS pos_usd REAL")
+        cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS pos_contracts REAL")
+        cursor.execute("ALTER TABLE stats ADD COLUMN IF NOT EXISTS pnl_usd REAL")
+        cursor.execute("ALTER TABLE stats ADD COLUMN IF NOT EXISTS exit_price REAL")
+    except Exception as e:
+        print(f"Попередження міграції: {e}")
+
     # Синхронізація сиротинських записів у таблиці stats при запуску
     cursor.execute('''
         UPDATE stats 
@@ -119,14 +136,12 @@ def save_active_signals(signals):
 
         for s in signals:
             tps = s.get('tps', [])
-            # Безпечне приведення числових значень масивів
             tp_prices = [to_native_float(tp[0]) for tp in tps] + [None] * 4
             tp_probs = [to_native_int(tp[1]) for tp in tps] + [None] * 4
 
             hit_tps_set = s.get('hit_tps', set())
             hit_tps_str = ",".join(map(str, sorted(list(hit_tps_set)))) if hit_tps_set else ""
 
-            # Примусове приведення типів даних для сумісності з PostgreSQL
             db_id = to_native_int(s.get('db_id'))
             entry = to_native_float(s['entry'])
             stop_loss = to_native_float(s.get('stop_loss'))
@@ -134,9 +149,13 @@ def save_active_signals(signals):
             dobar_high = to_native_float(s.get('dobar_high'))
             chart_message_id = to_native_int(s.get('chart_message_id'))
             stat_id = to_native_int(s.get('stat_id'))
+            
+            # Нові завантажені поля об'ємів
+            pos_usd = to_native_float(s.get('pos_usd', 0.0))
+            pos_contracts = to_native_float(s.get('pos_contracts', 0.0))
 
             if db_id:
-                # Якщо ID вже є, вставляємо з фіксованим ID
+                # Використовуємо ON CONFLICT для усунення будь-яких помилок унікальних ключів!
                 cursor.execute('''
                     INSERT INTO signals (
                         id, symbol, timeframe, direction, entry,
@@ -144,8 +163,33 @@ def save_active_signals(signals):
                         tp1, tp2, tp3, tp4,
                         tp1_prob, tp2_prob, tp3_prob, tp4_prob,
                         tier, chart_message_id, stat_id,
-                        status, show_dobar, hit_tps, created_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, %s, %s)
+                        status, show_dobar, hit_tps, pos_usd, pos_contracts, created_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, %s, %s, %s, %s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        symbol = EXCLUDED.symbol,
+                        timeframe = EXCLUDED.timeframe,
+                        direction = EXCLUDED.direction,
+                        entry = EXCLUDED.entry,
+                        stop_loss = EXCLUDED.stop_loss,
+                        dobar_low = EXCLUDED.dobar_low,
+                        dobar_high = EXCLUDED.dobar_high,
+                        tp1 = EXCLUDED.tp1,
+                        tp2 = EXCLUDED.tp2,
+                        tp3 = EXCLUDED.tp3,
+                        tp4 = EXCLUDED.tp4,
+                        tp1_prob = EXCLUDED.tp1_prob,
+                        tp2_prob = EXCLUDED.tp2_prob,
+                        tp3_prob = EXCLUDED.tp3_prob,
+                        tp4_prob = EXCLUDED.tp4_prob,
+                        tier = EXCLUDED.tier,
+                        chart_message_id = EXCLUDED.chart_message_id,
+                        stat_id = EXCLUDED.stat_id,
+                        status = EXCLUDED.status,
+                        show_dobar = EXCLUDED.show_dobar,
+                        hit_tps = EXCLUDED.hit_tps,
+                        pos_usd = EXCLUDED.pos_usd,
+                        pos_contracts = EXCLUDED.pos_contracts,
+                        created_at = EXCLUDED.created_at
                 ''', (
                     db_id,
                     s['symbol'], s['timeframe'], s['direction'], entry,
@@ -157,10 +201,11 @@ def save_active_signals(signals):
                     stat_id,
                     1 if s.get('show_dobar', True) else 0,
                     hit_tps_str,
+                    pos_usd,
+                    pos_contracts,
                     s.get('created_at', datetime.now().isoformat()),
                 ))
             else:
-                # Якщо це новий сигнал (точно 18 знаків %s перед 'active' для повної відповідності 21 параметру)
                 cursor.execute('''
                     INSERT INTO signals (
                         symbol, timeframe, direction, entry,
@@ -168,8 +213,8 @@ def save_active_signals(signals):
                         tp1, tp2, tp3, tp4,
                         tp1_prob, tp2_prob, tp3_prob, tp4_prob,
                         tier, chart_message_id, stat_id,
-                        status, show_dobar, hit_tps, created_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, %s, %s)
+                        status, show_dobar, hit_tps, pos_usd, pos_contracts, created_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, %s, %s, %s, %s)
                     RETURNING id
                 ''', (
                     s['symbol'], s['timeframe'], s['direction'], entry,
@@ -181,6 +226,8 @@ def save_active_signals(signals):
                     stat_id,
                     1 if s.get('show_dobar', True) else 0,
                     hit_tps_str,
+                    pos_usd,
+                    pos_contracts,
                     s.get('created_at', datetime.now().isoformat()),
                 ))
                 s['db_id'] = cursor.fetchone()['id']
@@ -217,7 +264,6 @@ def load_active_signals():
                     pct_val = round(abs(price - entry) / entry * 100, 1)
                     tps.append((price, prob or 50, pct_val))
 
-            # Десеріалізуємо hit_tps назад у Python-сет
             hit_tps_str = row['hit_tps']
             hit_tps_set = set()
             if hit_tps_str:
@@ -236,11 +282,13 @@ def load_active_signals():
                 'dobar_low': row['dobar_low'],
                 'dobar_high': row['dobar_high'],
                 'tps': tps,
-                'hit_tps': hit_tps_set,  # Передаємо відновлений сет досягнутих ТР
+                'hit_tps': hit_tps_set,
                 'tier': row['tier'],
                 'chart_message_id': row['chart_message_id'],
                 'stat_id': row['stat_id'],
                 'show_dobar': bool(row['show_dobar']),
+                'pos_usd': to_native_float(row.get('pos_usd', 0.0)),
+                'pos_contracts': to_native_float(row.get('pos_contracts', 0.0)),
                 'created_at': row['created_at'],
                 'stats': {
                     'count': 0, 'avg_dev': 0,
@@ -308,23 +356,70 @@ def add_signal_stat(symbol, timeframe, direction, entry, tier):
     finally:
         conn.close()
 
-def close_signal_stat(signal_id, result, pct):
+
+def close_signal_stat(signal_id, result, pct, exit_price=None):
+    """Розрахунок реального PnL в USD на основі об'єму та урахування комісій Maker/Taker"""
     if signal_id is None:
         return
     conn = get_connection()
     try:
-        cursor = conn.cursor()
-        # Примусово кастуємо відсотки та ID до стандартних числових типів Python
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # 1. Знаходимо вихідні дані закриваємого сигналу
+        cursor.execute("SELECT * FROM signals WHERE stat_id = %s", (signal_id,))
+        signal_row = cursor.fetchone()
+        
+        pnl_usd = 0.0
+        calculated_exit_price = to_native_float(exit_price)
+        
+        if signal_row:
+            entry = to_native_float(signal_row['entry'])
+            direction = signal_row['direction']
+            pos_contracts = to_native_float(signal_row['pos_contracts']) or 0.0
+            
+            # Якщо ціну виходу не було передано, вираховуємо її математично через відсоток pct
+            if calculated_exit_price is None:
+                if direction == 'LONG':
+                    calculated_exit_price = entry * (1 + pct / 100.0) if result == 'tp' else entry * (1 - abs(pct) / 100.0)
+                else:
+                    calculated_exit_price = entry * (1 - pct / 100.0) if result == 'tp' else entry * (1 + abs(pct) / 100.0)
+            
+            # Отримуємо точні комісії Maker / Taker під активну біржу
+            maker_fee, taker_fee = get_fees_for_exchange()
+            
+            # Розрахунок комісій (Вхід Taker, Вихід Maker для TP та Taker для SL)
+            entry_fee_usd = entry * pos_contracts * taker_fee
+            exit_fee_usd = calculated_exit_price * pos_contracts * (maker_fee if result == 'tp' else taker_fee)
+            total_fees = entry_fee_usd + exit_fee_usd
+            
+            # Розрахунок брудного фінансового результату в USD
+            if direction == 'LONG':
+                gross_pnl_usd = (calculated_exit_price - entry) * pos_contracts
+            else:
+                gross_pnl_usd = (entry - calculated_exit_price) * pos_contracts
+                
+            # Чистий прибуток / збиток у USD
+            pnl_usd = gross_pnl_usd - total_fees
+            
         cursor.execute('''
-            UPDATE stats SET result = %s, pct = %s, closed_at = %s
+            UPDATE stats 
+            SET result = %s, pct = %s, pnl_usd = %s, exit_price = %s, closed_at = %s
             WHERE id = %s
-        ''', (result, to_native_float(pct), datetime.now().isoformat(), to_native_int(signal_id)))
+        ''', (
+            result, 
+            to_native_float(pct), 
+            to_native_float(pnl_usd), 
+            to_native_float(calculated_exit_price), 
+            datetime.now().isoformat(), 
+            signal_id
+        ))
         conn.commit()
         cursor.close()
     except Exception as e:
         print(f"Помилка закриття статистики: {e}")
     finally:
         conn.close()
+
 
 def get_stats_summary():
     conn = get_connection()
@@ -362,6 +457,10 @@ def get_stats_summary():
         avg_loss_row = cursor.fetchone()
         avg_loss = round(avg_loss_row['avg'], 1) if avg_loss_row['avg'] else 0
 
+        # Розрахунок загального чистого прибутку/збитку в USD у статистиці
+        cursor.execute("SELECT SUM(pnl_usd) as total_usd FROM stats WHERE pnl_usd IS NOT NULL")
+        total_pnl_usd = cursor.fetchone()['total_usd'] or 0.0
+
         lines = [
             "📊 Статистика бота",
             f"",
@@ -371,6 +470,7 @@ def get_stats_summary():
             f"🛑 Закрито в SL: {sl}",
             f"⏳ Активних: {active}",
             f"",
+            f"💰 Фінансовий результат: <b>${total_pnl_usd:.2f}</b>",
             f"🎯 Winrate (TP+БУ): {winrate}%",
             f"💰 Середній прибуток: +{avg_profit}%",
             f"💸 Середній збиток: {avg_loss}%",

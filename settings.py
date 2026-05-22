@@ -22,7 +22,9 @@ DEFAULT_SETTINGS = {
     # Нові поля для ризику та вибору біржі
     'exchange_name': 'binance', # поточна активна біржа: 'binance' або 'mexc'
     'portfolio_size': 1000.0,   # загальний розмір депозиту в USD
-    'risk_pct': 1.0             # ризик на одну угоду у відсотках від депо (1%)
+    'risk_pct': 1.0,            # ризик на одну угоду у відсотках від депо (1%)
+    'leverage': 20,             # кредитне плече (1х - 200х)
+    'use_dobar': True           # чи використовувати тактику 1 усереднення (добору)
 }
 
 def load_settings():
@@ -62,7 +64,6 @@ def get_exchange_client(async_mode=False):
     exchange_name = get_setting('exchange_name') or 'binance'
     
     if exchange_name == 'mexc':
-        # Налаштування для безшовного переходу на безстрокові ф'ючерси (Swap) на MEXC
         return lib.mexc({
             'enableRateLimit': True,
             'verify': False,
@@ -70,7 +71,6 @@ def get_exchange_client(async_mode=False):
             'aiohttp_trust_env': False
         })
     else:
-        # Налаштування для ф'ючерсів USDT-M на Binance
         return lib.binanceusdm({
             'enableRateLimit': True,
             'verify': False,

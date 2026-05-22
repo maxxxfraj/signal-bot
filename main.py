@@ -76,8 +76,29 @@ ALL_TIMEFRAMES = ['5m', '15m', '30m', '1h', '4h', '1d']
 
 
 # ─────────────────────────────────────────────
+# GLOBAL KEYBOARDS (Глобально видимі функції на початку файлу)
+# ─────────────────────────────────────────────
+
+def main_menu_keyboard():
+    """Головне меню робота (з інтеграцією кнопки ручного сканування)"""
+    return {
+        'inline_keyboard': [
+            [{'text': '🔍 Сканувати зараз', 'callback_data': 'cfg_scan_now'}],
+            [{'text': '📊 Статистика', 'callback_data': 'stats'}],
+            [{'text': '⏳ Активні сигнали', 'callback_data': 'active'}],
+            [{'text': '⚙️ Налаштування', 'callback_data': 'cfg_main'}],
+            [{'text': 'ℹ️ Про бота', 'callback_data': 'info'}],
+            [{'text': '🗑 Очистити статистику', 'callback_data': 'clear'}],
+            [{'text': '🔴 Закрити всі сигнали', 'callback_data': 'clear_active'}],
+        ]
+    }
+
+
+# ─────────────────────────────────────────────
 # CHARTS & FORMATTING (ДИНАМІЧНИЙ РИЗИК ТА ПОСИЛАННЯ)
 # ─────────────────────────────────────────────
+
+is_scanning = False  # Глобальний запобіжник паралельних сканувань
 
 def get_exchange_link(symbol):
     """Генерує точне торгове посилання для ф'ючерсів Binance або MEXC"""
@@ -90,26 +111,45 @@ def get_exchange_link(symbol):
     else:
         return f"https://www.binance.com/en/futures/{symbol_clean}"
 
-def calculate_position_size(entry, stop_loss):
-    """Кількісний розрахунок об'єму ф'ючерсної позиції відповідно до волатильності та ризику"""
+def calculate_position_size_v2(entry, stop_loss, dobar_low=None, dobar_high=None):
+    """Розрахунок об'єму позиції та маржі з підтримкою кредитного плеча та тактики 1 усереднення (Добір)"""
     portfolio_size = get_setting('portfolio_size') or 1000.0
     risk_pct = get_setting('risk_pct') or 1.0
-    
+    leverage = get_setting('leverage') or 20
+    use_dobar = get_setting('use_dobar')
+    if use_dobar is None:
+        use_dobar = True
+
     # Сума ризику в доларах
     risk_amount = portfolio_size * (risk_pct / 100.0)
     
-    # Відсоткова відстань до стоп-лоссу
-    stop_distance_pct = abs(entry - stop_loss) / entry
+    # Визначаємо середню ціну входу
+    actual_entry = entry
+    is_averaged = False
+    dobar_price = 0.0
+    
+    if use_dobar and dobar_low is not None and dobar_high is not None:
+        # Середня ціна зони добору
+        dobar_price = (dobar_low + dobar_high) / 2.0
+        # Оскільки входимо 50% на Entry та 50% на Dobar, середня ціна входу зміщується
+        actual_entry = (entry + dobar_price) / 2.0
+        is_averaged = True
+
+    # Відсоткова відстань до стоп-лоссу від фактичної середньої ціни входу
+    stop_distance_pct = abs(actual_entry - stop_loss) / actual_entry
     if stop_distance_pct == 0:
-        return 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0, False, 0.0
         
-    # Рекомендований повний об'єм позиції у USDT (з урахуванням кредитного плеча)
+    # Рекомендований повний об'єм позиції у USDT (з урахуванням плеча)
     position_size_usd = risk_amount / stop_distance_pct
     
     # Рекомендована кількість монет у контрактах
-    position_size_contracts = position_size_usd / entry
+    position_size_contracts = position_size_usd / actual_entry
     
-    return round(risk_amount, 2), round(position_size_usd, 2), round(position_size_contracts, 2)
+    # Необхідна маржа (колатерал) для відкриття позиції
+    margin_required = position_size_usd / leverage
+    
+    return round(risk_amount, 2), round(position_size_usd, 2), round(position_size_contracts, 2), round(margin_required, 2), is_averaged, round(actual_entry, 6)
 
 def _get_candles_sync(symbol, timeframe, limit):
     limits = {'5m': 60, '15m': 50, '1h': 40, '4h': 30, '1d': 20}
@@ -256,27 +296,44 @@ def format_signal(symbol, timeframe, direction, entry, dobar_low, dobar_high,
                   tps, stats, hit_tps=[], tier='🟢', stop_loss=None):
     dir_emoji = "📈" if direction == "LONG" else "📉"
     exchange_name = get_setting('exchange_name') or 'binance'
+    leverage = get_setting('leverage') or 20
     
     # Отримуємо торгове посилання під активну біржу
     link = get_exchange_link(symbol)
     
     lines = []
-    # Хештег стає активним та зручним посиланням на термінал біржі
     lines.append(f"<a href='{link}'>#{symbol}</a> {timeframe} {tier} (on {exchange_name.upper()})")
     lines.append(f"💎 СТАТУС : {direction} {dir_emoji}")
     lines.append(f"")
-    lines.append(f"👉 ENTRY : {entry}")
-    lines.append(f"👉 ДОБОР : {dobar_low} — {dobar_high}")
+    
+    # Додаємо динамічні розрахунки ризиків з підтримкою Добіру
+    risk_usd, pos_usd, pos_contracts, margin_required, is_averaged, avg_entry = calculate_position_size_v2(
+        entry, stop_loss, dobar_low, dobar_high
+    )
+    
+    if is_averaged:
+        lines.append(f"👉 ENTRY (Avg): <b>{avg_entry}</b>")
+        lines.append(f"👉 ДОБОР : {dobar_low} — {dobar_high}")
+        lines.append(f"ℹ️ <i>(50% на {entry} + 50% у середньому на Добір)</i>")
+    else:
+        lines.append(f"👉 ENTRY : {entry}")
+        lines.append(f"👉 ДОБОР : {dobar_low} — {dobar_high}")
+        
     if stop_loss:
         lines.append(f"🛑 СТОП : {stop_loss}")
         
-        # Додаємо динамічні розрахунки ризиків
-        risk_usd, pos_usd, pos_contracts = calculate_position_size(entry, stop_loss)
         if pos_usd > 0:
             lines.append(f"")
             lines.append(f"⚖️ <b>РИЗИК-МЕНЕДЖМЕНТ:</b>")
             lines.append(f"💵 Макс. Ризик: <b>${risk_usd}</b>")
-            lines.append(f"💼 Реком. Об'єм: <b>${pos_usd}</b> (або {pos_contracts:.1f} {symbol[:-4]})")
+            
+            if is_averaged:
+                lines.append(f"💼 Реком. Об'єм: <b>${pos_usd}</b> (або {pos_contracts:.1f} {symbol[:-4]})")
+                lines.append(f"💵 <i>-> ${pos_usd/2:.2f} на вхід + ${pos_usd/2:.2f} на добір</i>")
+            else:
+                lines.append(f"💼 Реком. Об'єм: <b>${pos_usd}</b> (або {pos_contracts:.1f} {symbol[:-4]})")
+                
+            lines.append(f"⚡ Необхідна маржа: <b>${margin_required}</b> (при плечі {leverage}x)")
             
     lines.append(f"")
 
@@ -304,23 +361,6 @@ def format_signal(symbol, timeframe, direction, entry, dobar_low, dobar_high,
     return "\n".join(lines)
 
 
-# ─────────────────────────────────────────────
-# SETTINGS MENU HELPERS
-# ─────────────────────────────────────────────
-
-def main_menu_keyboard():
-    return {
-        'inline_keyboard': [
-            [{'text': '🔍 Сканувати зараз', 'callback_data': 'cfg_scan_now'}],
-            [{'text': '📊 Статистика', 'callback_data': 'stats'}],
-            [{'text': '⏳ Активні сигнали', 'callback_data': 'active'}],
-            [{'text': '⚙️ Налаштування', 'callback_data': 'cfg_main'}],
-            [{'text': 'ℹ️ Про бота', 'callback_data': 'info'}],
-            [{'text': '🗑 Очистити статистику', 'callback_data': 'clear'}],
-            [{'text': '🔴 Закрити всі сигнали', 'callback_data': 'clear_active'}],
-        ]
-    }
-
 def get_timeframe_keyboard(current):
     options = ['all', '5m', '15m', '30m', '1h', '4h', '1d']
     labels = {
@@ -342,7 +382,7 @@ def get_timeframe_keyboard(current):
 
 
 # ─────────────────────────────────────────────
-# SIGNAL MONITORING (УЗГОДЖЕНО ТРИ АРГУМЕНТИ)
+# SIGNAL MONITORING (УЗГОДЖЕНО ТРИ АРГУМЕНТИ ТА FALLBACKS)
 # ─────────────────────────────────────────────
 
 async def monitor_signal(bot, signal, active_signals):
@@ -410,8 +450,16 @@ async def monitor_signal(bot, signal, active_signals):
                         await bot.send_message(chat_id=CHAT_ID, text="\n".join(msg_lines),
                                                reply_to_message_id=chart_message_id, parse_mode='HTML')
                     except Exception as e:
-                        print(f"Помилка відправки БУ {symbol}: {e}")
-                    close_signal_stat(signal.get('stat_id'), 'tp', round(total_profit, 1))
+                        if "Message to be replied not found" in str(e):
+                            try:
+                                await bot.send_message(chat_id=CHAT_ID, text="\n".join(msg_lines), parse_mode='HTML')
+                            except Exception as ex:
+                                print(f"Помилка закриття {symbol}: {ex}")
+                        else:
+                            print(f"Помилка відправки БУ {symbol}: {e}")
+                    
+                    # Закриваємо з точним розрахунком PnL у хмарі
+                    close_signal_stat(signal.get('stat_id'), 'tp', round(total_profit, 1), price)
                 else:
                     sl_pct = round(abs(price - entry) / entry * 100, 1)
                     msg_lines.append(f"🛑 Stop-Loss спрацював ({elapsed}) | -{sl_pct}%")
@@ -421,10 +469,20 @@ async def monitor_signal(bot, signal, active_signals):
                         await bot.send_message(chat_id=CHAT_ID, text="\n".join(msg_lines),
                                                reply_to_message_id=chart_message_id, parse_mode='HTML')
                     except Exception as e:
-                        print(f"Помилка відправки СЛ {symbol}: {e}")
-                    close_signal_stat(signal.get('stat_id'), 'sl', -sl_pct)
+                        if "Message to be replied not found" in str(e):
+                            try:
+                                await bot.send_message(chat_id=CHAT_ID, text="\n".join(msg_lines), parse_mode='HTML')
+                            except Exception as ex:
+                                print(f"Помилка закриття {symbol}: {ex}")
+                        else:
+                            print(f"Помилка відправки СЛ {symbol}: {e}")
+                    
+                    # Фіксуємо мінусовий PnL у базі даних
+                    close_signal_stat(signal.get('stat_id'), 'sl', -sl_pct, price)
 
                 remove_active_signal(symbol, signal['timeframe'])
+                if signal in active_signals:
+                    active_signals.remove(signal)
                 break
 
         # Перевірка БУ після TP1
@@ -451,10 +509,18 @@ async def monitor_signal(bot, signal, active_signals):
                     await bot.send_message(chat_id=CHAT_ID, text="\n".join(msg_lines),
                                            reply_to_message_id=chart_message_id, parse_mode='HTML')
                 except Exception as e:
-                    print(f"Помилка відправки БУ {symbol}: {e}")
+                    if "Message to be replied not found" in str(e):
+                        try:
+                            await bot.send_message(chat_id=CHAT_ID, text="\n".join(msg_lines), parse_mode='HTML')
+                        except Exception as ex:
+                            print(f"Помилка закриття {symbol}: {ex}")
+                    else:
+                        print(f"Помилка відправки БУ {symbol}: {e}")
 
-                close_signal_stat(signal.get('stat_id'), 'tp', round(total_profit, 1))
+                close_signal_stat(signal.get('stat_id'), 'tp', round(total_profit, 1), price)
                 remove_active_signal(symbol, signal['timeframe'])
+                if signal in active_signals:
+                    active_signals.remove(signal)
                 break
 
         # Перевірка досягнення TP
@@ -508,7 +574,21 @@ async def monitor_signal(bot, signal, active_signals):
                     read_timeout=30, write_timeout=30, connect_timeout=30,
                 )
             except Exception as e:
-                print(f"Помилка відправки оновлення {symbol}: {e}")
+                # Fallback: Якщо виникла помилка надсилання графіка (включаючи File must be non-empty)
+                # або повідомлення видалено, ми просто відправляємо текст оновлення ТР
+                try:
+                    print(f"⚠️ Помилка фото {symbol} ({e}), відправляємо як чистий текст...")
+                    await bot.send_message(
+                        chat_id=CHAT_ID, text=new_text,
+                        reply_to_message_id=chart_message_id,
+                        parse_mode='HTML'
+                    )
+                except Exception as ex:
+                    if "Message to be replied not found" in str(ex):
+                        try:
+                            await bot.send_message(chat_id=CHAT_ID, text=new_text, parse_mode='HTML')
+                        except Exception as ex2:
+                            print(f"Критична помилка відправки тексту {symbol}: {ex2}")
 
             if len(hit_tps) == len(tps):
                 last_tp = max(hit_tps)
@@ -530,18 +610,24 @@ async def monitor_signal(bot, signal, active_signals):
                     await bot.send_message(chat_id=CHAT_ID, text="\n".join(msg_lines),
                                            reply_to_message_id=chart_message_id, parse_mode='HTML')
                 except Exception as e:
-                    print(f"Помилка відправки закриття {symbol}: {e}")
+                    if "Message to be replied not found" in str(e):
+                        try:
+                            await bot.send_message(chat_id=CHAT_ID, text="\n".join(msg_lines), parse_mode='HTML')
+                        except Exception as ex:
+                            print(f"Помилка закриття {symbol}: {ex}")
+                    else:
+                        print(f"Помилка відправки закриття {symbol}: {e}")
 
-                close_signal_stat(signal.get('stat_id'), 'tp', round(total_profit, 1))
+                close_signal_stat(signal.get('stat_id'), 'tp', round(total_profit, 1), price)
                 remove_active_signal(symbol, signal['timeframe'])
+                if signal in active_signals:
+                    active_signals.remove(signal)
                 break
 
 
 # ─────────────────────────────────────────────
 # SCAN & SEND
 # ─────────────────────────────────────────────
-
-is_scanning = False  # Глобальний запобіжник паралельних сканувань (захист від Race Condition)
 
 async def scan_and_send(bot, active_signals, timeframes):
     global recently_sent, is_scanning
@@ -575,6 +661,15 @@ async def scan_and_send(bot, active_signals, timeframes):
                 continue
 
             try:
+                # Отримуємо фактичні розраховані об'єми під добір для збереження в базу
+                _, pos_usd, pos_contracts, _, _, _ = calculate_position_size_v2(
+                    signal['entry'], signal.get('stop_loss'), signal.get('dobar_low'), signal.get('dobar_high')
+                )
+                
+                # Додаємо об'єми до об'єкта сигналу, щоб вони збереглися
+                signal['pos_usd'] = pos_usd
+                signal['pos_contracts'] = pos_contracts
+
                 signal_text = format_signal(
                     symbol_clean, signal['timeframe'],
                     signal['direction'], signal['entry'],
@@ -598,7 +693,7 @@ async def scan_and_send(bot, active_signals, timeframes):
 
                 sent = await bot.send_photo(
                     chat_id=CHAT_ID, photo=chart, caption=signal_text,
-                    parse_mode='HTML',  # Клікабельні посилання в новому сигналі
+                    parse_mode='HTML',  # Клікабельні посилання в новом сигналі
                     read_timeout=30, write_timeout=30, connect_timeout=30,
                 )
 
@@ -664,18 +759,6 @@ async def handle_updates(bot, active_signals):
                             text="🤖 Сигнальний бот\nОберіть дію:",
                             reply_markup=main_menu_keyboard()
                         )
-                        
-                    elif text == '/scan':
-                        if is_scanning:
-                            await bot.send_message(chat_id=chat_id, text="⏳ Сканування вже виконується іншим процесом. Будь ласка, зачекайте...")
-                            continue
-                            
-                        await bot.send_message(chat_id=chat_id, text="🔍 Запущено позачергове ручне сканування для всіх активних таймфреймів...")
-                        active_tfs = get_setting('active_timeframes')
-                        success = await scan_and_send(bot, active_signals, active_tfs)
-                        
-                        if success:
-                            await bot.send_message(chat_id=chat_id, text="✅ Ручне сканування успішно завершено!")
 
                     elif text == '/settings':
                         await bot.send_message(
@@ -687,7 +770,19 @@ async def handle_updates(bot, active_signals):
 
                     elif text == '/stats':
                         summary = get_stats_summary()
-                        await bot.send_message(chat_id=chat_id, text=summary)
+                        await bot.send_message(chat_id=chat_id, text=summary, parse_mode='HTML')
+
+                    elif text == '/scan':
+                        if is_scanning:
+                            await bot.send_message(chat_id=chat_id, text="⏳ Сканування вже виконується автоматичним таймером або іншим процесом. Будь ласка, зачекайте...")
+                            continue
+                            
+                        await bot.send_message(chat_id=chat_id, text="🔍 Запущено позачергове ручне сканування для всіх активних таймфреймів...")
+                        active_tfs = get_setting('active_timeframes')
+                        success = await scan_and_send(bot, active_signals, active_tfs)
+                        
+                        if success:
+                            await bot.send_message(chat_id=chat_id, text="✅ Ручне сканування успішно завершено!")
 
                     elif text == '/active':
                         if not active_signals:
@@ -726,7 +821,7 @@ async def handle_updates(bot, active_signals):
 
                     elif data == 'stats':
                         summary = get_stats_summary()
-                        await bot.send_message(chat_id=chat_id, text=summary)
+                        await bot.send_message(chat_id=chat_id, text=summary, parse_mode='HTML')
 
                     elif data == 'active':
                         if not active_signals:
@@ -744,7 +839,7 @@ async def handle_updates(bot, active_signals):
 
                     elif data == 'cfg_scan_now':
                         if is_scanning:
-                            await bot.send_message(chat_id=chat_id, text="⏳ Сканування вже виконується іншим процесом. Будь ласка, зачекайте...")
+                            await bot.send_message(chat_id=chat_id, text="⏳ Сканування вже виконується автоматичним таймером або іншим процесом. Будь ласка, зачекайте...")
                             continue
                             
                         await bot.send_message(chat_id=chat_id, text="🔍 Запущено позачергове ручне сканування для всіх активних таймфреймів...")
@@ -753,7 +848,6 @@ async def handle_updates(bot, active_signals):
                         
                         if success:
                             await bot.send_message(chat_id=chat_id, text="✅ Ручне сканування успішно завершено!")
-                    
 
                     elif data == 'info':
                         htf = get_setting('htf_bias_enabled')
@@ -938,7 +1032,7 @@ async def handle_updates(bot, active_signals):
                         text, markup = risk_keyboard()
                         await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
 
-                    # Нові кнопки налаштування депозиту та ризику %
+                    # Налаштування депозиту та ризику %
                     elif data == 'risk_depo_up':
                         v = (get_setting('portfolio_size') or 1000.0) + 100.0
                         set_setting('portfolio_size', min(v, 1000000.0))
@@ -963,7 +1057,28 @@ async def handle_updates(bot, active_signals):
                         text, markup = risk_keyboard()
                         await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
 
-                    elif data in ['risk_stop_info', 'risk_tp1_info', 'risk_max_info', 'risk_depo_info', 'risk_pct_info', 'filter_prob_info', 'filter_htf_info']:
+                    # Нові кнопки зміни кредитного плеча та Добіру
+                    elif data == 'risk_lev_up':
+                        v = (get_setting('leverage') or 20) + 5
+                        set_setting('leverage', min(v, 200))
+                        text, markup = risk_keyboard()
+                        await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
+
+                    elif data == 'risk_lev_down':
+                        v = (get_setting('leverage') or 20) - 5
+                        set_setting('leverage', max(v, 1))
+                        text, markup = risk_keyboard()
+                        await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
+
+                    elif data == 'toggle_dobar':
+                        current = get_setting('use_dobar')
+                        if current is None:
+                            current = True
+                        set_setting('use_dobar', not current)
+                        text, markup = risk_keyboard()
+                        await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
+
+                    elif data in ['risk_stop_info', 'risk_tp1_info', 'risk_max_info', 'risk_depo_info', 'risk_pct_info', 'risk_lev_info', 'filter_prob_info', 'filter_htf_info']:
                         pass  # інформаційні кнопки
 
                     # ── Фільтри стратегій ──
@@ -1184,7 +1299,7 @@ async def main():
     await asyncio.gather(
         loop_5m(), loop_15m(), loop_30m(),
         loop_1h(), loop_4h(), loop_1d(),
-        daily_stats(), clear_recently_sent(),
+        daily_stats(), core_recently_sent_fallback_chain() if False else clear_recently_sent(), # Безпечний запуск
         handle_updates(bot, active_signals),
     )
 
