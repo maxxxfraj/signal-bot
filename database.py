@@ -82,7 +82,7 @@ def init_db():
     conn.commit()
     cursor.close()
     conn.close()
-    print("✅ База даних PostgreSQL ініціалізована")
+    print("✅ База даних PostgreSQL ініціалізована та мігрована")
 
 # =====================
 # Активні сигнали
@@ -129,7 +129,7 @@ def save_active_signals(signals):
                     s.get('created_at', datetime.now().isoformat()),
                 ))
             else:
-                # Якщо це новий сигнал, записуємо та отримуємо згенерований SERIAL ID через RETURNING
+                # Якщо це новий сигнал, записуємо БЕЗ поля id (точно 18 знаків %s перед 'active')
                 cursor.execute('''
                     INSERT INTO signals (
                         symbol, timeframe, direction, entry,
@@ -138,7 +138,7 @@ def save_active_signals(signals):
                         tp1_prob, tp2_prob, tp3_prob, tp4_prob,
                         tier, chart_message_id, stat_id,
                         status, show_dobar, hit_tps, created_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, %s, %s)
                     RETURNING id
                 ''', (
                     s['symbol'], s['timeframe'], s['direction'], s['entry'],
@@ -186,6 +186,7 @@ def load_active_signals():
                     pct_val = round(abs(price - entry) / entry * 100, 1)
                     tps.append((price, prob or 50, pct_val))
 
+            # Десеріалізуємо hit_tps назад у Python-сет
             hit_tps_str = row['hit_tps']
             hit_tps_set = set()
             if hit_tps_str:
@@ -244,8 +245,8 @@ def clear_active_signals():
     conn = get_connection()
     try:
         cursor = conn.cursor()
-        conn.execute("UPDATE signals SET status = 'cleared' WHERE status = 'active'")
-        conn.execute("UPDATE stats SET result = 'cleared', closed_at = %s WHERE result = 'active'", (datetime.now().isoformat(),))
+        cursor.execute("UPDATE signals SET status = 'cleared' WHERE status = 'active'")
+        cursor.execute("UPDATE stats SET result = 'cleared', closed_at = %s WHERE result = 'active'", (datetime.now().isoformat(),))
         conn.commit()
         cursor.close()
     except Exception as e:
@@ -368,7 +369,7 @@ def get_stats_summary():
                     f"SL:{row['sl_cnt']} | {wr}%"
                 )
 
-# Топ 5 пар за winrate (Повністю адаптовано під синтаксис PostgreSQL)
+        # Топ 5 пар за winrate (Повністю адаптовано під синтаксис PostgreSQL)
         cursor.execute('''
             SELECT symbol,
                    COUNT(*) as total,
