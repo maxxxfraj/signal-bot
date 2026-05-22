@@ -662,13 +662,17 @@ async def scan_and_send(bot, active_signals, timeframes):
 
             try:
                 # Отримуємо фактичні розраховані об'єми під добір для збереження в базу
-                _, pos_usd, pos_contracts, _, _, _ = calculate_position_size_v2(
+                _, pos_usd, pos_contracts, _, _, avg_entry = calculate_position_size_v2(
                     signal['entry'], signal.get('stop_loss'), signal.get('dobar_low'), signal.get('dobar_high')
                 )
                 
-                # Додаємо об'єми до об'єкта сигналу, щоб вони збереглися
+                # Додаємо об'єми та середню ціну входу до об'єкта сигналу, щоб вони збереглися в хмарі
                 signal['pos_usd'] = pos_usd
                 signal['pos_contracts'] = pos_contracts
+                
+                # Якщо використовуємо добір, записуємо середню ціну входу для ідеального PnL трекінгу
+                if get_setting('use_dobar'):
+                    signal['entry'] = avg_entry
 
                 signal_text = format_signal(
                     symbol_clean, signal['timeframe'],
