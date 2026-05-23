@@ -32,7 +32,7 @@
   "stop_atr_mult": 2.0,
   "tp1_atr_mult": 0.8,
   "max_active_signals": 25,
-  "exchange_name": "mexc",
+  "exchange_name": "binance",
   "portfolio_size": 100.0,
   "leverage": 40,
   "btc_filter_enabled": false,

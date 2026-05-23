@@ -4,7 +4,6 @@ from psycopg2.extras import RealDictCursor
 from datetime import datetime
 from dotenv import load_dotenv
 
-# Беремо посилання на базу з налаштувань системи (.env або Render)
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 def get_connection():
@@ -22,7 +21,6 @@ def get_connection():
 
 
 def to_native_float(val):
-    """Примусово конвертує будь-які типи (включаючи numpy.float64) у стандартний float Python"""
     if val is None:
         return None
     try:
@@ -32,7 +30,6 @@ def to_native_float(val):
 
 
 def to_native_int(val):
-    """Примусово конвертує будь-які типи (включаючи numpy.int64) у стандартний int Python"""
     if val is None:
         return None
     try:
@@ -100,12 +97,16 @@ def init_db():
         )
     ''')
 
-    # Безпечні міграції PostgreSQL: додаємо колонки для трекінгу реального PnL та маржі, якщо їх немає
+    # Безпечні міграції PostgreSQL
     try:
         cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS pos_usd REAL")
         cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS pos_contracts REAL")
         cursor.execute("ALTER TABLE stats ADD COLUMN IF NOT EXISTS pnl_usd REAL")
         cursor.execute("ALTER TABLE stats ADD COLUMN IF NOT EXISTS exit_price REAL")
+        
+        # НОВІ КОЛОНКИ ДЛЯ ФАНДИНГУ ТА ВІДДКРИТОГО ІНТЕРЕСУ [1]
+        cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS funding_rate REAL")
+        cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS open_interest REAL")
     except Exception as e:
         print(f"Попередження міграції: {e}")
 
@@ -136,12 +137,14 @@ def save_active_signals(signals):
 
         for s in signals:
             tps = s.get('tps', [])
+            # Безпечне приведення числових значень масивів
             tp_prices = [to_native_float(tp[0]) for tp in tps] + [None] * 4
             tp_probs = [to_native_int(tp[1]) for tp in tps] + [None] * 4
 
             hit_tps_set = s.get('hit_tps', set())
             hit_tps_str = ",".join(map(str, sorted(list(hit_tps_set)))) if hit_tps_set else ""
 
+            # Примусове приведення типів даних для сумісності з PostgreSQL
             db_id = to_native_int(s.get('db_id'))
             entry = to_native_float(s['entry'])
             stop_loss = to_native_float(s.get('stop_loss'))
@@ -155,7 +158,7 @@ def save_active_signals(signals):
             pos_contracts = to_native_float(s.get('pos_contracts', 0.0))
 
             if db_id:
-                # Використовуємо ON CONFLICT для усунення будь-яких помилок унікальних ключів!
+                # Якщо ID вже є, вставляємо з фіксованим ID
                 cursor.execute('''
                     INSERT INTO signals (
                         id, symbol, timeframe, direction, entry,
@@ -206,6 +209,7 @@ def save_active_signals(signals):
                     s.get('created_at', datetime.now().isoformat()),
                 ))
             else:
+                # Якщо це новий сигнал, записуємо БЕЗ поля id (точно 23 знаки %s)
                 cursor.execute('''
                     INSERT INTO signals (
                         symbol, timeframe, direction, entry,
@@ -289,6 +293,8 @@ def load_active_signals():
                 'show_dobar': bool(row['show_dobar']),
                 'pos_usd': to_native_float(row.get('pos_usd', 0.0)),
                 'pos_contracts': to_native_float(row.get('pos_contracts', 0.0)),
+                'funding_rate': to_native_float(row.get('funding_rate')),
+                'open_interest': to_native_float(row.get('open_interest')),
                 'created_at': row['created_at'],
                 'stats': {
                     'count': 0, 'avg_dev': 0,
@@ -373,30 +379,44 @@ def close_signal_stat(signal_id, result, pct, exit_price=None):
         calculated_exit_price = to_native_float(exit_price)
         
         if signal_row:
-            entry = to_native_float(signal_row['entry'])
+            entry = to_native_float(signal_row['entry'])  # Оригінальна початкова ціна входу
             direction = signal_row['direction']
             pos_contracts = to_native_float(signal_row['pos_contracts']) or 0.0
             
-            # Якщо ціну виходу не було передано, вираховуємо її математично через відсоток pct
+            dobar_low = to_native_float(signal_row['dobar_low'])
+            dobar_high = to_native_float(signal_row['dobar_high'])
+            
+            # Визначаємо фактичну ціну входу (з урахуванням усереднення, якщо воно увімкнено)
+            from settings import get_setting
+            use_dobar = get_setting('use_dobar')
+            if use_dobar is None:
+                use_dobar = True
+                
+            actual_entry = entry
+            if use_dobar and dobar_low is not None and dobar_high is not None:
+                dobar_mid = (dobar_low + dobar_high) / 2.0
+                actual_entry = (entry + dobar_mid) / 2.0
+            
+            # Якщо реальну ціну виходу не було передано, вираховуємо її через відсоток pct від фактичного входу
             if calculated_exit_price is None:
                 if direction == 'LONG':
-                    calculated_exit_price = entry * (1 + pct / 100.0) if result == 'tp' else entry * (1 - abs(pct) / 100.0)
+                    calculated_exit_price = actual_entry * (1 + pct / 100.0) if result == 'tp' else actual_entry * (1 - abs(pct) / 100.0)
                 else:
-                    calculated_exit_price = entry * (1 - pct / 100.0) if result == 'tp' else entry * (1 + abs(pct) / 100.0)
+                    calculated_exit_price = actual_entry * (1 - pct / 100.0) if result == 'tp' else actual_entry * (1 + abs(pct) / 100.0)
             
             # Отримуємо точні комісії Maker / Taker під активну біржу
             maker_fee, taker_fee = get_fees_for_exchange()
             
             # Розрахунок комісій (Вхід Taker, Вихід Maker для TP та Taker для SL)
-            entry_fee_usd = entry * pos_contracts * taker_fee
+            entry_fee_usd = actual_entry * pos_contracts * taker_fee
             exit_fee_usd = calculated_exit_price * pos_contracts * (maker_fee if result == 'tp' else taker_fee)
             total_fees = entry_fee_usd + exit_fee_usd
             
             # Розрахунок брудного фінансового результату в USD
             if direction == 'LONG':
-                gross_pnl_usd = (calculated_exit_price - entry) * pos_contracts
+                gross_pnl_usd = (calculated_exit_price - actual_entry) * pos_contracts
             else:
-                gross_pnl_usd = (entry - calculated_exit_price) * pos_contracts
+                gross_pnl_usd = (actual_entry - calculated_exit_price) * pos_contracts
                 
             # Чистий прибуток / збиток у USD
             pnl_usd = gross_pnl_usd - total_fees

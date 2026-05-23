@@ -138,7 +138,7 @@ def check_signal_by_type(last, prev, df, symbol, timeframe, direction):
             ema_cross = ema_f > ema_s
             macd_ok = last['macd'] > last['macd_signal']
             volume_ok = last['volume'] > last['volume_ma'] * 0.7
-            bb_ok = last['close'] > last['bb_mid']
+            bb_ok = last['close'] < last['bb_mid']
             confirmations = sum([ema_cross, macd_ok, volume_ok, bb_ok])
             return trend and rsi_ok and candle and confirmations >= 2
 
@@ -450,6 +450,57 @@ async def find_signal(symbol, timeframe, scan_logs=None, btc_df=None):
         log_skip(f"⛔ {symbol} {timeframe} {direction} — ймовірність TP1 ({tp1_prob}%) менша за мінімальну ({min_prob}%), пропускаємо", scan_logs)
         return None
 
+    # 3. НОВИЙ БЛОК: Запит Фандингу та Відкритого Інтересу (Тільки для повністю валідних угод!) [1]
+    open_interest = None
+    funding_rate = None
+    
+    # Визначаємо правильний символ під активну біржу
+    ccxt_symbol = symbol[:-4] + '/USDT:USDT' if get_setting('exchange_name') == 'mexc' else symbol
+    
+    # Розумний Фандинг Фільтр [1]
+    funding_filt = get_setting('funding_filter_enabled')
+    if funding_filt is None:
+        funding_filt = True
+    funding_max_pct = get_setting('funding_max_limit') or 0.05
+    
+    try:
+        # fetch_funding_rate повертає поточну ставку фінансування деривативу
+        funding_data = await exchange.fetch_funding_rate(ccxt_symbol)
+        funding_rate = funding_data.get('fundingRate') # повертається як абсолютне число, наприклад 0.0001 (0.01%)
+        
+        if funding_rate is not None and funding_filt:
+            funding_rate_pct = funding_rate * 100.0
+            
+            # Якщо лонг, але фандинг занадто гарячий у бік лонгів (лонгісти перегріті) [1]
+            if direction == 'LONG' and funding_rate_pct >= funding_max_pct:
+                log_skip(f"⛔ {symbol} — Фільтр фандингу заблокував LONG (Перегрів покупців: {funding_rate_pct:.3f}% >= {funding_max_pct}%)", scan_logs)
+                return None
+            # Якщо шорт, але фандинг занадто негативний у бік шортів (шортисти перегріті) [1]
+            elif direction == 'SHORT' and funding_rate_pct <= -funding_max_pct:
+                log_skip(f"⛔ {symbol} — Фільтр фандингу заблокував SHORT (Перегрів продавців: {funding_rate_pct:.3f}% <= -{funding_max_pct}%)", scan_logs)
+                return None
+    except Exception as e:
+        print(f"Помилка отримання Funding Rate для {symbol}: {e}")
+        
+    try:
+        # fetch_open_interest повертає поточний Відкритий Інтерес (OI) [1]
+        oi_data = await exchange.fetch_open_interest(ccxt_symbol)
+        open_interest = oi_data.get('openInterestValue') # сумарне значення відкритого деривативного об'єму в USDT
+    except Exception as e:
+        print(f"Помилка отримання Open Interest для {symbol}: {e}")
+
+    # Розумний Фільтр мінімального Відкритого Інтересу (OI) [1]
+    oi_filt = get_setting('oi_filter_enabled')
+    if oi_filt is None:
+        oi_filt = True
+    oi_min_limit = get_setting('oi_min_limit') or 10.0
+    
+    if open_interest is not None and oi_filt:
+        oi_m = open_interest / 1000000.0  # Переводимо в мільйони доларів ($M)
+        if oi_m < oi_min_limit:
+            log_skip(f"⛔ {symbol} — Фільтр мінімального OI заблокував сигнал (Низька деривативна ліквідність: ${oi_m:.2f}M < ${oi_min_limit:.1f}M)", scan_logs)
+            return None
+
     if stats['count'] > 0:
         tps_with_probs = []
         for i, (tp_price, _, pct) in enumerate(tps):
@@ -476,7 +527,9 @@ async def find_signal(symbol, timeframe, scan_logs=None, btc_df=None):
         'stats': stats,
         'tier': tier,
         'stop_loss': stop_loss,
-        'correlation': correlation  # Передаємо розраховану кореляцію до BTC у main.py
+        'correlation': correlation,
+        'funding_rate': funding_rate * 100.0 if funding_rate is not None else None, # Записуємо у відсотках
+        'open_interest': open_interest # Значення в USDT
     }
 
 

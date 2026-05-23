@@ -26,9 +26,17 @@ DEFAULT_SETTINGS = {
     'leverage': 20,             # кредитне плече (1х - 200х)
     'use_dobar': True,          # чи використовувати тактику 1 усереднення (добору)
     
-    # НОВІ ПАРАМЕТРИ ФІЛЬТРІВ
+    # Параметри фільтрів
     'btc_filter_enabled': True,     # Розумний фільтр Біткоїна (Market Beta)
-    'regime_filter_enabled': True   # Розумний класифікатор ринкового режиму (Trend/Flat)
+    'regime_filter_enabled': True,   # Розумний класифікатор ринкового режиму (Trend/Flat)
+    
+    # Параметри фандингу
+    'funding_filter_enabled': True,  # Розумний фандинг-фільтр перегріву ринку
+    'funding_max_limit': 0.05,       # Максимально дозволена ставка фінансування (%)
+    
+    # НОВІ ПАРАМЕТРИ МІНІМАЛЬНОГО ВІДКРИТОГО ІНТЕРЕСУ (OI) [1]
+    'oi_filter_enabled': True,       # Розумний фільтр мінімального Open Interest
+    'oi_min_limit': 10.0             # Мінімально дозволений ліміт OI в мільйонах USD ($10.0M)
 }
 
 def load_settings():

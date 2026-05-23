@@ -137,36 +137,53 @@ def filters_keyboard():
     min_prob = get_setting('min_tp1_prob')
     htf_thresh = get_setting('htf_diff_threshold')
     
-    # Нові параметри
     btc_filt = get_setting('btc_filter_enabled')
     if btc_filt is None:
         btc_filt = True
     regime_filt = get_setting('regime_filter_enabled')
     if regime_filt is None:
         regime_filt = True
+        
+    funding_filt = get_setting('funding_filter_enabled')
+    if funding_filt is None:
+        funding_filt = True
+    funding_max = get_setting('funding_max_limit') or 0.05
+    
+    # Нові параметри OI [1]
+    oi_filt = get_setting('oi_filter_enabled')
+    if oi_filt is None:
+        oi_filt = True
+    oi_min = get_setting('oi_min_limit') or 10.0
 
     text = (
         f"🔍 Фільтри стратегій\n\n"
         f"⏱ HTF bias фільтр: <b>{'УВІМКНЕНO ✅' if htf else 'ВИМКНЕНО ⬜'}</b>\n"
         f"🔢 Мін. ймовірність TP1: <b>{min_prob}%</b>\n"
-        f"📐 HTF поріг (різниця EMA): <b>{htf_thresh}%</b>\n"
-        f"🪙 Фільтр Біткоїна (BTC Trend): <b>{'УВІМКНЕНO ✅' if btc_filt else 'ВИМКНЕНО ⬜'}</b>\n"
-        f"📊 Класифікатор режиму ринку: <b>{'УВІМКНЕНO ✅' if regime_filt else 'ВИМКНЕНО ⬜'}</b>\n\n"
+        f"📐 HTF поріг (EMA різниця): <b>{htf_thresh}%</b>\n"
+        f"🪙 Фільтр BTC (BTC Trend): <b>{'УВІМКНЕНO ✅' if btc_filt else 'ВИМКНЕНО ⬜'}</b>\n"
+        f"📊 Режим ринку (ADX): <b>{'УВІМКНЕНO ✅' if regime_filt else 'ВИМКНЕНО ⬜'}</b>\n"
+        f"💵 Фільтр Фандингу: <b>{'УВІМКНЕНO ✅' if funding_filt else 'ВИМКНЕНО ⬜'}</b>\n"
+        f"🌡 Макс. Фандинг ліміт: <b>{funding_max:.3f}%</b>\n"
+        f"📈 Фільтр мін. OI: <b>{'УВІМКНЕНO ✅' if oi_filt else 'ВИМКНЕНО ⬜'}</b>\n"
+        f"📉 Мін. OI ліміт: <b>${oi_min:.1f}M</b>\n\n"
         f"Використовуй ➖/➕ або кнопки-перемикачі нижче:"
     )
     keyboard = [
-        [InlineKeyboardButton(
-            f"{'✅' if htf else '⬜'} HTF bias фільтр",
-            callback_data="toggle_htf"
-        )],
-        [InlineKeyboardButton(
-            f"{'✅' if btc_filt else '⬜'} Фільтр Біткоїна",
-            callback_data="toggle_btc_filter"
-        )],
-        [InlineKeyboardButton(
-            f"{'✅' if regime_filt else '⬜'} Класифікатор ринку",
-            callback_data="toggle_regime_filter"
-        )],
+        [InlineKeyboardButton(f"{'✅' if htf else '⬜'} HTF bias фільтр", callback_data="toggle_htf")],
+        [InlineKeyboardButton(f"{'✅' if btc_filt else '⬜'} Фільтр Біткоїна", callback_data="toggle_btc_filter")],
+        [InlineKeyboardButton(f"{'✅' if regime_filt else '⬜'} Класифікатор ринку", callback_data="toggle_regime_filter")],
+        [InlineKeyboardButton(f"{'✅' if funding_filt else '⬜'} Фільтр Фандингу", callback_data="toggle_funding_filter")],
+        [
+            InlineKeyboardButton("Фандинг −", callback_data="filter_funding_down"),
+            InlineKeyboardButton(f"{funding_max:.3f}%", callback_data="filter_funding_info"),
+            InlineKeyboardButton("Фандинг +", callback_data="filter_funding_up"),
+        ],
+        [InlineKeyboardButton(f"{'✅' if oi_filt else '⬜'} Фільтр мінімального OI", callback_data="toggle_oi_filter")],
+        [
+            InlineKeyboardButton("OI −", callback_data="filter_oi_down"),
+            InlineKeyboardButton(f"${oi_min:.1f}M", callback_data="filter_oi_info"),
+            InlineKeyboardButton("OI +", callback_data="filter_oi_up"),
+        ],
         [
             InlineKeyboardButton("Мін. TP1% −", callback_data="filter_prob_down"),
             InlineKeyboardButton(f"TP1 ≥ {min_prob}%", callback_data="filter_prob_info"),
@@ -206,12 +223,22 @@ def get_settings_text():
     if regime_filt is None:
         regime_filt = True
         
+    funding_filt = get_setting('funding_filter_enabled')
+    if funding_filt is None:
+        funding_filt = True
+    funding_max = get_setting('funding_max_limit') or 0.05
+    
+    oi_filt = get_setting('oi_filter_enabled')
+    if oi_filt is None:
+        oi_filt = True
+    oi_min = get_setting('oi_min_limit') or 10.0
+        
     exchange_name = get_setting('exchange_name') or 'binance'
 
     return (
         f"⚙️ Налаштування бота\n\n"
         f"🏛 Активна біржа: <b>{exchange_name.upper()}</b>\n"
-        f"📋 Пари: {len(watchlist)} активних\n"
+        f"📋 Пари: {len(watchlist)} active\n"
         f"⏱ Таймфрейми: {', '.join(tfs)}\n"
         f"📍 Стоп: ATR × {stop}\n"
         f"🎯 TP1: ATR × {tp1}\n"
@@ -219,6 +246,8 @@ def get_settings_text():
         f"🔍 HTF фільтр: {'увімк.' if htf else 'вимк.'}\n"
         f"🪙 Фільтр BTC: {'увімк.' if btc_filt else 'вимк.'}\n"
         f"📊 Режим ринку: {'увімк.' if regime_filt else 'вимк.'}\n"
+        f"💵 Фільтр Фандингу: {'увімк.' if funding_filt else 'вимк.'} (ліміт {funding_max:.3f}%)\n"
+        f"📈 Фільтр мін. OI: {'увімк.' if oi_filt else 'вимк.'} (ліміт ${oi_min:.1f}M)\n"
         f"📊 Макс. сигналів: {max_sig}\n"
         f"💰 Депозит: ${portfolio_size:.0f} (Ризик {risk_pct:.1f}% | {leverage}x | {'Добір' if use_dobar else 'Без добору'})"
     )

@@ -293,7 +293,8 @@ def generate_chart(symbol, timeframe, direction, entry, dobar_low, dobar_high,
     return buf
 
 def format_signal(symbol, timeframe, direction, entry, dobar_low, dobar_high,
-                  tps, stats, hit_tps=[], tier='🟢', stop_loss=None, correlation=None):
+                  tps, stats, hit_tps=[], tier='🟢', stop_loss=None, correlation=None,
+                  funding_rate=None, open_interest=None):
     dir_emoji = "📈" if direction == "LONG" else "📉"
     exchange_name = get_setting('exchange_name') or 'binance'
     leverage = get_setting('leverage') or 20
@@ -304,13 +305,19 @@ def format_signal(symbol, timeframe, direction, entry, dobar_low, dobar_high,
     lines = []
     lines.append(f"<a href='{link}'>#{symbol}</a> {timeframe} {tier} (on {exchange_name.upper()})")
     lines.append(f"💎 СТАТУС : {direction} {dir_emoji}")
-        
-    # Виводимо рівень кореляції до Біткоїна
+    
+    # Виводимо коефіцієнт лінійної кореляції до BTC [4]
     if correlation is not None:
         lines.append(f"🪙 Кореляція до BTC: <b>{correlation}</b>")
         
+    # Виводимо ставку фінансування та відкритий інтерес [1]
+    if funding_rate is not None or open_interest is not None:
+        oi_str = f"${open_interest / 1000000.0:.2f}M" if open_interest is not None else "N/A"
+        fund_str = f"{funding_rate:.4f}%" if funding_rate is not None else "N/A"
+        lines.append(f"📈 Open Interest: <b>{oi_str}</b> | Funding: <b>{fund_str}</b>")
+        
     lines.append(f"")
-
+    
     # Розраховуємо об'єми та середню точку входу
     risk_usd, pos_usd, pos_contracts, margin_required, is_averaged, avg_entry = calculate_position_size_v2(
         entry, stop_loss, dobar_low, dobar_high
@@ -685,11 +692,12 @@ async def scan_and_send(bot, active_signals, timeframes, scan_logs=None):
                     signal['entry'], signal.get('stop_loss'), signal.get('dobar_low'), signal.get('dobar_high')
                 )
                 
-                # Додаємо об'єми до об'єкта сигналу, щоб вони збереглися
+                # Наповнюємо об'єкт сигналу новими даними деривативів для збереження в базу
                 signal['pos_usd'] = pos_usd
                 signal['pos_contracts'] = pos_contracts
+                signal['funding_rate'] = signal.get('funding_rate')
+                signal['open_interest'] = signal.get('open_interest')
                 
-                # Якщо використовуємо добір, записуємо середню ціну входу для ідеального PnL трекінгу
                 if get_setting('use_dobar'):
                     signal['entry'] = avg_entry
 
@@ -700,7 +708,9 @@ async def scan_and_send(bot, active_signals, timeframes, scan_logs=None):
                     signal['tps'], signal['stats'],
                     tier=signal.get('tier', '🟢'),
                     stop_loss=signal.get('stop_loss'),
-                    correlation=signal.get('correlation')  # Передаємо розраховану кореляцію!
+                    correlation=signal.get('correlation'),
+                    funding_rate=signal.get('funding_rate'),  # <--- Передаємо фандинг
+                    open_interest=signal.get('open_interest')  # <--- Передаємо відкритий інтерес
                 )
 
                 ccxt_symbol = symbol_clean[:-4] + '/USDT'
@@ -1152,7 +1162,7 @@ async def handle_updates(bot, active_signals):
                         text, markup = risk_keyboard()
                         await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
 
-                    elif data in ['risk_stop_info', 'risk_tp1_info', 'risk_max_info', 'risk_depo_info', 'risk_pct_info', 'risk_lev_info', 'filter_prob_info', 'filter_htf_info']:
+                    elif data in ['risk_stop_info', 'risk_tp1_info', 'risk_max_info', 'risk_depo_info', 'risk_pct_info', 'risk_lev_info', 'filter_prob_info', 'filter_htf_info', 'filter_funding_info', 'filter_oi_info']:
                         pass  # інформаційні кнопки
 
                     # ── Фільтри стратегій ──
@@ -1199,6 +1209,46 @@ async def handle_updates(bot, active_signals):
                     elif data == 'filter_htf_down':
                         v = round(get_setting('htf_diff_threshold') - 0.5, 1)
                         set_setting('htf_diff_threshold', max(v, 0.1))
+                        text, markup = filters_keyboard()
+                        await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
+
+                    elif data == 'toggle_funding_filter':
+                            current = get_setting('funding_filter_enabled')
+                            if current is None:
+                                current = True
+                            set_setting('funding_filter_enabled', not current)
+                            text, markup = filters_keyboard()
+                            await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
+
+                    elif data == 'filter_funding_up':
+                            v = round((get_setting('funding_max_limit') or 0.05) + 0.005, 3)
+                            set_setting('funding_max_limit', min(v, 0.5))
+                            text, markup = filters_keyboard()
+                            await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
+
+                    elif data == 'filter_funding_down':
+                            v = round((get_setting('funding_max_limit') or 0.05) - 0.005, 3)
+                            set_setting('funding_max_limit', max(v, 0.005))
+                            text, markup = filters_keyboard()
+                            await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
+
+                    elif data == 'toggle_oi_filter':
+                        current = get_setting('oi_filter_enabled')
+                        if current is None:
+                            current = True
+                        set_setting('oi_filter_enabled', not current)
+                        text, markup = filters_keyboard()
+                        await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
+
+                    elif data == 'filter_oi_up':
+                        v = (get_setting('oi_min_limit') or 10.0) + 1.0
+                        set_setting('oi_min_limit', min(v, 100.0))
+                        text, markup = filters_keyboard()
+                        await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
+
+                    elif data == 'filter_oi_down':
+                        v = (get_setting('oi_min_limit') or 10.0) - 1.0
+                        set_setting('oi_min_limit', max(v, 1.0))
                         text, markup = filters_keyboard()
                         await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
 
