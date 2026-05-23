@@ -132,22 +132,40 @@ def risk_keyboard():
 
 
 def filters_keyboard():
-    """Меню фільтрів стратегій (повертає і текст, і клавіатуру)"""
+    """Меню фільтрів стратегій (повертає і текст, і клавіатуру з новими вмикачами)"""
     htf = get_setting('htf_bias_enabled')
     min_prob = get_setting('min_tp1_prob')
     htf_thresh = get_setting('htf_diff_threshold')
+    
+    # Нові параметри
+    btc_filt = get_setting('btc_filter_enabled')
+    if btc_filt is None:
+        btc_filt = True
+    regime_filt = get_setting('regime_filter_enabled')
+    if regime_filt is None:
+        regime_filt = True
 
     text = (
         f"🔍 Фільтри стратегій\n\n"
-        f"HTF bias фільтр: {'увімк.' if htf else 'вимк.'}\n"
-        f"Мін. ймовірність TP1: <b>{min_prob}%</b>\n"
-        f"HTF поріг (різниця EMA): <b>{htf_thresh}%</b>\n\n"
-        f"Використовуй ➖/➕ для зміни"
+        f"⏱ HTF bias фільтр: <b>{'УВІМКНЕНO ✅' if htf else 'ВИМКНЕНО ⬜'}</b>\n"
+        f"🔢 Мін. ймовірність TP1: <b>{min_prob}%</b>\n"
+        f"📐 HTF поріг (різниця EMA): <b>{htf_thresh}%</b>\n"
+        f"🪙 Фільтр Біткоїна (BTC Trend): <b>{'УВІМКНЕНO ✅' if btc_filt else 'ВИМКНЕНО ⬜'}</b>\n"
+        f"📊 Класифікатор режиму ринку: <b>{'УВІМКНЕНO ✅' if regime_filt else 'ВИМКНЕНО ⬜'}</b>\n\n"
+        f"Використовуй ➖/➕ або кнопки-перемикачі нижче:"
     )
     keyboard = [
         [InlineKeyboardButton(
             f"{'✅' if htf else '⬜'} HTF bias фільтр",
             callback_data="toggle_htf"
+        )],
+        [InlineKeyboardButton(
+            f"{'✅' if btc_filt else '⬜'} Фільтр Біткоїна",
+            callback_data="toggle_btc_filter"
+        )],
+        [InlineKeyboardButton(
+            f"{'✅' if regime_filt else '⬜'} Класифікатор ринку",
+            callback_data="toggle_regime_filter"
         )],
         [
             InlineKeyboardButton("Мін. TP1% −", callback_data="filter_prob_down"),
@@ -180,6 +198,14 @@ def get_settings_text():
     use_dobar = get_setting('use_dobar')
     if use_dobar is None:
         use_dobar = True
+        
+    btc_filt = get_setting('btc_filter_enabled')
+    if btc_filt is None:
+        btc_filt = True
+    regime_filt = get_setting('regime_filter_enabled')
+    if regime_filt is None:
+        regime_filt = True
+        
     exchange_name = get_setting('exchange_name') or 'binance'
 
     return (
@@ -191,6 +217,8 @@ def get_settings_text():
         f"🎯 TP1: ATR × {tp1}\n"
         f"🔢 Мін. TP1 prob: {min_prob}%\n"
         f"🔍 HTF фільтр: {'увімк.' if htf else 'вимк.'}\n"
+        f"🪙 Фільтр BTC: {'увімк.' if btc_filt else 'вимк.'}\n"
+        f"📊 Режим ринку: {'увімк.' if regime_filt else 'вимк.'}\n"
         f"📊 Макс. сигналів: {max_sig}\n"
         f"💰 Депозит: ${portfolio_size:.0f} (Ризик {risk_pct:.1f}% | {leverage}x | {'Добір' if use_dobar else 'Без добору'})"
     )

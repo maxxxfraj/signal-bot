@@ -69,13 +69,10 @@ def get_params(symbol, timeframe, direction):
 async def get_candles(symbol, timeframe, limit=1000):
     global _load_markets_lock
     try:
-        # Безпечне подвійне блокування (Double-Checked Locking)
-        # Навіть якщо 100 тасок одночасно викличуть цю функцію,
-        # запит на Binance піде лише ОДИН РАЗ від першої таски.
         if not exchange.markets:
             async with _load_markets_lock:
                 if not exchange.markets:
-                    print("⏳ Попереднє завантаження інформації про ринки Binance...")
+                    print(f"⏳ Попереднє завантаження інформації про ринки {get_setting('exchange_name').upper()}...")
                     await exchange.load_markets()
                     print("✅ Інформацію про ринки успішно завантажено та закешовано!")
 
@@ -90,6 +87,7 @@ async def get_candles(symbol, timeframe, limit=1000):
 
 
 def calculate_indicators(df):
+    # Розрахунок базових індикаторів
     df['ema20'] = ta.trend.ema_indicator(df['close'], window=20)
     df['ema50'] = ta.trend.ema_indicator(df['close'], window=50)
     df['rsi'] = ta.momentum.rsi(df['close'], window=14)
@@ -157,19 +155,19 @@ def check_signal_by_type(last, prev, df, symbol, timeframe, direction):
                     rsi_min < last['rsi'] < rsi_max)
 
     elif strategy_type == 'bb_bounce':
-            if direction == 'SHORT':
-                return (last['close'] > last['bb_upper'] and
-                        last['rsi'] > rsi_min and
-                        last['close'] < last['open'])
-            else:
-                return (last['close'] < last['bb_lower'] and
-                        last['rsi'] < rsi_max and
-                        last['close'] > last['open'])
+        if direction == 'SHORT':
+            return (last['close'] > last['bb_upper'] and
+                    last['rsi'] > rsi_min and
+                    last['close'] < last['open'])
+        else:
+            return (last['close'] < last['bb_lower'] and
+                    last['rsi'] < rsi_max and
+                    last['close'] > last['open'])
 
     elif strategy_type == 'breakout':
         high_20 = df['high'].rolling(20).max().iloc[-2]
         low_20 = df['low'].rolling(20).min().iloc[-2]
-        if direction == 'SHORT':
+        if direction == 'LONG':  # Виправлена неінвертована логіка
             return (prev['close'] < high_20 and
                     last['close'] > high_20 and
                     last['volume'] > last['volume_ma'] * 1.5 and
@@ -261,6 +259,48 @@ async def check_higher_tf_bias(symbol, timeframe, direction):
         print(f"HTF bias error {symbol} {timeframe}: {e}")
         return True
 
+
+async def check_btc_and_correlation(symbol, timeframe, df_alt, direction):
+    """Розрахунок лінійної кореляції Пірсона до BTC та трендовий фільтр Біткоїна"""
+    btc_filt = get_setting('btc_filter_enabled')
+    if btc_filt is None:
+        btc_filt = True
+        
+    try:
+        # Завантажуємо свічки BTC/USDT на аналогічному таймфреймі
+        df_btc = await get_candles('BTC/USDT', timeframe, limit=len(df_alt))
+        if df_btc is None or len(df_btc) < 50:
+            return True, 0.0
+
+        # Розрахунок кореляції Пірсона через Pandas (з вирівнюванням індексів) [4]
+        df_alt_aligned, df_btc_aligned = df_alt.align(df_btc, join='inner', axis=0)
+        returns_alt = df_alt_aligned['close'].pct_change().dropna()
+        returns_btc = df_btc_aligned['close'].pct_change().dropna()
+        
+        correlation = returns_alt.corr(returns_btc)
+        if pd.isna(correlation):
+            correlation = 0.0
+
+        # Трендовий фільтр BTC
+        if btc_filt:
+            ema20_btc = ta.trend.ema_indicator(df_btc['close'], window=20).iloc[-1]
+            ema50_btc = ta.trend.ema_indicator(df_btc['close'], window=50).iloc[-1]
+            
+            btc_bullish = ema20_btc > ema50_btc
+            
+            if direction == 'LONG' and not btc_bullish:
+                print(f"⛔ {symbol} — фільтр BTC заблокував LONG (BTC у спадному тренді)")
+                return False, correlation
+            elif direction == 'SHORT' and btc_bullish:
+                print(f"⛔ {symbol} — фільтр BTC заблокував SHORT (BTC у висхідному тренді)")
+                return False, correlation
+
+        return True, round(correlation, 2)
+    except Exception as e:
+        print(f"Помилка розрахунку метрик BTC для {symbol}: {e}")
+        return True, 0.0
+
+
 async def find_signal(symbol, timeframe):
     # Динамічно збільшуємо ліміт свічок для дрібних таймфреймів
     limit = 1000
@@ -273,7 +313,7 @@ async def find_signal(symbol, timeframe):
     if df is None or len(df) < 60:
         return None
 
-# Виконуємо розрахунок індикаторів у фоновому потоці, не блокуючи Event Loop
+    # Асинхронний виклик важких розрахунків індикаторів
     df = await asyncio.to_thread(calculate_indicators, df)
     df = df.dropna()
 
@@ -300,6 +340,37 @@ async def find_signal(symbol, timeframe):
     if direction is None:
         return None
 
+    # 1. Фільтр ринкового режиму ADX (Trending vs flat)
+    regime_filter = get_setting('regime_filter_enabled')
+    if regime_filter is None:
+        regime_filter = True
+        
+    if regime_filter:
+        try:
+            # Отримуємо тип стратегії сигналу
+            _, _, _, _, strategy_type = get_params(symbol, timeframe, direction)
+            
+            # Рахуємо силу тренду через ADX
+            adx_series = ta.trend.adx(df['high'], df['low'], df['close'], window=14)
+            latest_adx = adx_series.iloc[-1]
+            
+            trend_strategies = ['ema_rsi', 'macd_cross', 'breakout', 'vol_spike']
+            mean_reversion_strategies = ['bb_bounce', 'mean_reversion']
+            
+            if strategy_type in trend_strategies and latest_adx < 20:
+                print(f"⛔ {symbol} {timeframe} {direction} — ринок у флеті (ADX={latest_adx:.1f} < 20), трендовий вхід заблоковано")
+                return None
+            elif strategy_type in mean_reversion_strategies and latest_adx > 25:
+                print(f"⛔ {symbol} {timeframe} {direction} — сильний тренд (ADX={latest_adx:.1f} > 25), контртрендовий вхід заблоковано")
+                return None
+        except Exception as e:
+            print(f"Помилка розрахунку фільтра ринкового режиму для {symbol}: {e}")
+
+    # 2. Фільтр тренду BTC та розрахунок лінійної кореляції Пірсона
+    btc_pass, correlation = await check_btc_and_correlation(symbol, timeframe, df, direction)
+    if not btc_pass:
+        return None
+
     # Перевірка тренду на старшому таймфреймі
     bias_ok = await check_higher_tf_bias(symbol, timeframe, direction)
     if not bias_ok:
@@ -307,7 +378,7 @@ async def find_signal(symbol, timeframe):
 
     entry = round(price, 6)
 
-    # Отримуємо параметри поточної стратегії для правильного бектесту та розрахунку цілей
+    # Отримуємо параметри поточної стратегії
     ema_fast, ema_slow, rsi_min, rsi_max, strategy_type = get_params(symbol, timeframe, direction)
     stop_mult = get_setting('stop_atr_mult')
     tp1_mult = get_setting('tp1_atr_mult')
@@ -336,7 +407,7 @@ async def find_signal(symbol, timeframe):
     # Визначаємо мінімальну кількість угод для бектесту
     min_trades = 12 if timeframe in ['5m', '15m', '30m'] else 20
 
-# Виконуємо бектест у фоновому потоці, повністю вивільняючи ресурси бота
+    # Швидкий бектест у фоновому потоці
     stats = await asyncio.to_thread(
         run_backtest,
         df, direction,
@@ -348,7 +419,7 @@ async def find_signal(symbol, timeframe):
         stop_mult=stop_mult,
         tp1_mult=tp1_mult,
         min_trades=min_trades,
-        min_prob=get_setting('min_tp1_prob') # <--- Тепер бектестер читає ваші налаштування з Telegram!
+        min_prob=get_setting('min_tp1_prob')
     )
 
     if not stats or not stats.get('is_valid', False):
@@ -388,7 +459,9 @@ async def find_signal(symbol, timeframe):
         'stats': stats,
         'tier': tier,
         'stop_loss': stop_loss,
+        'correlation': correlation  # Передаємо розраховану кореляцію до BTC у main.py
     }
+
 
 async def scan_all(timeframes=None):
     if timeframes is None:
@@ -396,12 +469,18 @@ async def scan_all(timeframes=None):
 
     watchlist = get_setting('watchlist')
 
-    # Тут прибрано попередній load_markets, оскільки тепер 
-    # безпечне подвійне блокування (Double-Checked Locking) 
-    # інтегровано безпосередньо всередину функції get_candles.
+    # Семафор обмежує кількість ОДНОЧАСНИХ асинхронних завдань сканування (наприклад, максимум 3)
+    # Це захищає Render від вичерпання RAM (OOM) та запобігає бану лімітів API (HTTP 429)
+    sem = asyncio.Semaphore(3)
+
+    async def sem_find_signal(symbol, timeframe):
+        async with sem:
+            # Мікро-пауза між запусками для згладжування навантаження на API
+            await asyncio.sleep(0.2)
+            return await find_signal(symbol, timeframe)
 
     tasks = [
-        find_signal(symbol, timeframe)
+        sem_find_signal(symbol, timeframe)
         for symbol in watchlist
         for timeframe in timeframes
     ]

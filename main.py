@@ -293,7 +293,7 @@ def generate_chart(symbol, timeframe, direction, entry, dobar_low, dobar_high,
     return buf
 
 def format_signal(symbol, timeframe, direction, entry, dobar_low, dobar_high,
-                  tps, stats, hit_tps=[], tier='🟢', stop_loss=None):
+                  tps, stats, hit_tps=[], tier='🟢', stop_loss=None, correlation=None):
     dir_emoji = "📈" if direction == "LONG" else "📉"
     exchange_name = get_setting('exchange_name') or 'binance'
     leverage = get_setting('leverage') or 20
@@ -304,8 +304,13 @@ def format_signal(symbol, timeframe, direction, entry, dobar_low, dobar_high,
     lines = []
     lines.append(f"<a href='{link}'>#{symbol}</a> {timeframe} {tier} (on {exchange_name.upper()})")
     lines.append(f"💎 СТАТУС : {direction} {dir_emoji}")
+        
+    # Виводимо рівень кореляції до Біткоїна
+    if correlation is not None:
+        lines.append(f"🪙 Кореляція до BTC: <b>{correlation}</b>")
+        
     lines.append(f"")
-    
+
     # Розраховуємо об'єми та середню точку входу
     risk_usd, pos_usd, pos_contracts, margin_required, is_averaged, avg_entry = calculate_position_size_v2(
         entry, stop_loss, dobar_low, dobar_high
@@ -684,7 +689,8 @@ async def scan_and_send(bot, active_signals, timeframes):
                     signal['dobar_low'], signal['dobar_high'],
                     signal['tps'], signal['stats'],
                     tier=signal.get('tier', '🟢'),
-                    stop_loss=signal.get('stop_loss')
+                    stop_loss=signal.get('stop_loss'),
+                    correlation=signal.get('correlation')  # <--- Передаємо розраховану кореляцію!
                 )
 
                 ccxt_symbol = symbol_clean[:-4] + '/USDT'
@@ -1117,6 +1123,22 @@ async def handle_updates(bot, active_signals):
                     elif data == 'filter_htf_down':
                         v = round(get_setting('htf_diff_threshold') - 0.5, 1)
                         set_setting('htf_diff_threshold', max(v, 0.1))
+                        text, markup = filters_keyboard()
+                        await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
+
+                    elif data == 'toggle_btc_filter':
+                        current = get_setting('btc_filter_enabled')
+                        if current is None:
+                            current = True
+                        set_setting('btc_filter_enabled', not current)
+                        text, markup = filters_keyboard()
+                        await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
+
+                    elif data == 'toggle_regime_filter':
+                        current = get_setting('regime_filter_enabled')
+                        if current is None:
+                            current = True
+                        set_setting('regime_filter_enabled', not current)
                         text, markup = filters_keyboard()
                         await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
 
