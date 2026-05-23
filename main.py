@@ -638,17 +638,27 @@ async def monitor_signal(bot, signal, active_signals):
 # SCAN & SEND
 # ─────────────────────────────────────────────
 
-async def scan_and_send(bot, active_signals, timeframes):
+is_scanning = False  # Глобальний запобіжник паралельних сканувань (захист від Race Condition)
+
+def log_skip_main(msg, scan_logs=None):
+    """Службовий помічник для запису пропусків у консоль та накопичувач логів у main.py"""
+    print(msg)
+    if scan_logs is not None:
+        scan_logs.append(msg)
+
+
+async def scan_and_send(bot, active_signals, timeframes, scan_logs=None):
     global recently_sent, is_scanning
     
-    # Якщо сканування вже виконується — блокуємо дублювання
+    # Якщо сканування вже виконується іншим процесом — блокуємо дублювання
     if is_scanning:
-        print("⚠️ Сканування вже виконується іншим процесом, пропускаємо")
+        log_skip_main("⚠️ Сканування вже виконується іншим процесом, пропускаємо", scan_logs)
         return False
         
     is_scanning = True
     try:
-        all_signals = await scan_all(timeframes)
+        # Передаємо накопичувач логів далі у scanner.py
+        all_signals = await scan_all(timeframes, scan_logs=scan_logs)
         new_count = 0
         max_signals = get_setting('max_active_signals')
 
@@ -657,7 +667,7 @@ async def scan_and_send(bot, active_signals, timeframes):
                 break
 
             if len(active_signals) >= max_signals:
-                print(f"⚠️ Досягнуто ліміт активних сигналів ({max_signals})")
+                log_skip_main(f"⚠️ Досягнуто ліміт активних сигналів ({max_signals})", scan_logs)
                 break
 
             symbol_clean = signal['symbol'].replace('/', '')
@@ -666,7 +676,7 @@ async def scan_and_send(bot, active_signals, timeframes):
             )
 
             if is_already_monitored or symbol_clean in recently_sent:
-                print(f"⚠️ {symbol_clean} вже моніториться — пропускаємо")
+                log_skip_main(f"⚠️ {symbol_clean} вже моніториться — пропускаємо", scan_logs)
                 continue
 
             try:
@@ -675,7 +685,7 @@ async def scan_and_send(bot, active_signals, timeframes):
                     signal['entry'], signal.get('stop_loss'), signal.get('dobar_low'), signal.get('dobar_high')
                 )
                 
-                # Додаємо об'єми та середню ціну входу до об'єкта сигналу, щоб вони збереглися в хмарі
+                # Додаємо об'єми до об'єкта сигналу, щоб вони збереглися
                 signal['pos_usd'] = pos_usd
                 signal['pos_contracts'] = pos_contracts
                 
@@ -690,7 +700,7 @@ async def scan_and_send(bot, active_signals, timeframes):
                     signal['tps'], signal['stats'],
                     tier=signal.get('tier', '🟢'),
                     stop_loss=signal.get('stop_loss'),
-                    correlation=signal.get('correlation')  # <--- Передаємо розраховану кореляцію!
+                    correlation=signal.get('correlation')  # Передаємо розраховану кореляцію!
                 )
 
                 ccxt_symbol = symbol_clean[:-4] + '/USDT'
@@ -707,7 +717,7 @@ async def scan_and_send(bot, active_signals, timeframes):
 
                 sent = await bot.send_photo(
                     chat_id=CHAT_ID, photo=chart, caption=signal_text,
-                    parse_mode='HTML',  # Клікабельні посилання в новом сигналі
+                    parse_mode='HTML',  # Клікабельні посилання в новому сигналі
                     read_timeout=30, write_timeout=30, connect_timeout=30,
                 )
 
@@ -788,15 +798,37 @@ async def handle_updates(bot, active_signals):
 
                     elif text == '/scan':
                         if is_scanning:
-                            await bot.send_message(chat_id=chat_id, text="⏳ Сканування вже виконується автоматичним таймером або іншим процесом. Будь ласка, зачекайте...")
+                            await bot.send_message(chat_id=chat_id, text="⏳ Сканування вже виконується іншим процесом. Будь ласка, зачекайте...")
                             continue
                             
                         await bot.send_message(chat_id=chat_id, text="🔍 Запущено позачергове ручне сканування для всіх активних таймфреймів...")
+                        
+                        # Створюємо локальний накопичувач логів унікально для цього ручного запиту!
+                        scan_logs = []
                         active_tfs = get_setting('active_timeframes')
-                        success = await scan_and_send(bot, active_signals, active_tfs)
+                        success = await scan_and_send(bot, active_signals, active_tfs, scan_logs=scan_logs)
                         
                         if success:
-                            await bot.send_message(chat_id=chat_id, text="✅ Ручне сканування успішно завершено!")
+                            if scan_logs:
+                                # Ескейпимо спецсимволи (<, >) для безпечної відправки в Telegram HTML [1]
+                                import html
+                                escaped_logs = [html.escape(line) for line in scan_logs]
+                                log_text = "\n".join(escaped_logs)
+                                
+                                if len(log_text) > 3900:
+                                    log_text = log_text[:3800] + "\n\n⚠️ <i>(Лог обрізано через ліміт повідомлення Telegram)</i>"
+                                
+                                await bot.send_message(
+                                    chat_id=chat_id,
+                                    text=f"📋 <b>Результати сканування:</b>\n\n{log_text}\n\n✅ <b>Ручне сканування успішно завершено!</b>",
+                                    parse_mode='HTML'
+                                )
+                            else:
+                                await bot.send_message(
+                                    chat_id=chat_id, 
+                                    text="✅ <b>Ручне сканування успішно завершено! Нових сигналів не знайдено.</b>", 
+                                    parse_mode='HTML'
+                                )
 
                     elif text == '/active':
                         if not active_signals:
@@ -852,16 +884,44 @@ async def handle_updates(bot, active_signals):
                         await bot.send_message(chat_id=chat_id, text=msg)
 
                     elif data == 'cfg_scan_now':
-                        if is_scanning:
-                            await bot.send_message(chat_id=chat_id, text="⏳ Сканування вже виконується автоматичним таймером або іншим процесом. Будь ласка, зачекайте...")
-                            continue
+                            if is_scanning:
+                                await bot.send_message(
+                                    chat_id=chat_id, 
+                                    text="⏳ Сканування вже виконується іншим процесом. Будь ласка, зачекайте..."
+                                )
+                                continue
                             
-                        await bot.send_message(chat_id=chat_id, text="🔍 Запущено позачергове ручне сканування для всіх активних таймфреймів...")
-                        active_tfs = get_setting('active_timeframes')
-                        success = await scan_and_send(bot, active_signals, active_tfs)
-                        
-                        if success:
-                            await bot.send_message(chat_id=chat_id, text="✅ Ручне сканування успішно завершено!")
+                            await bot.send_message(
+                                chat_id=chat_id, 
+                                text="🔍 Запущено позачергове ручне сканування для всіх активних таймфреймів..."
+                            )
+                            
+                            # Накопичувач логів
+                            scan_logs = []
+                            active_tfs = get_setting('active_timeframes')
+                            success = await scan_and_send(bot, active_signals, active_tfs, scan_logs=scan_logs)
+                            
+                            if success:
+                                if scan_logs:
+                                    # Ескейпимо спецсимволи (<, >) для безпечної відправки в Telegram HTML [1]
+                                    import html
+                                    escaped_logs = [html.escape(line) for line in scan_logs]
+                                    log_text = "\n".join(escaped_logs)
+                                    
+                                    if len(log_text) > 3900:
+                                        log_text = log_text[:3800] + "\n\n⚠️ <i>(Лог обрізано через ліміт повідомлення Telegram)</i>"
+                                    
+                                    await bot.send_message(
+                                        chat_id=chat_id,
+                                        text=f"📋 <b>Результати сканування:</b>\n\n{log_text}\n\n✅ <b>Ручне сканування успішно завершено!</b>",
+                                        parse_mode='HTML'
+                                    )
+                                else:
+                                    await bot.send_message(
+                                        chat_id=chat_id, 
+                                        text="✅ <b>Ручне сканування успішно завершено! Нових сигналів не знайдено.</b>", 
+                                        parse_mode='HTML'
+                                    )
 
                     elif data == 'info':
                         htf = get_setting('htf_bias_enabled')
@@ -1102,6 +1162,22 @@ async def handle_updates(bot, active_signals):
                         text, markup = filters_keyboard()
                         await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
 
+                    elif data == 'toggle_btc_filter':
+                        current = get_setting('btc_filter_enabled')
+                        if current is None:
+                            current = True
+                        set_setting('btc_filter_enabled', not current)
+                        text, markup = filters_keyboard()
+                        await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
+
+                    elif data == 'toggle_regime_filter':
+                        current = get_setting('regime_filter_enabled')
+                        if current is None:
+                            current = True
+                        set_setting('regime_filter_enabled', not current)
+                        text, markup = filters_keyboard()
+                        await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
+
                     elif data == 'filter_prob_up':
                         v = get_setting('min_tp1_prob') + 5
                         set_setting('min_tp1_prob', min(v, 90))
@@ -1123,22 +1199,6 @@ async def handle_updates(bot, active_signals):
                     elif data == 'filter_htf_down':
                         v = round(get_setting('htf_diff_threshold') - 0.5, 1)
                         set_setting('htf_diff_threshold', max(v, 0.1))
-                        text, markup = filters_keyboard()
-                        await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
-
-                    elif data == 'toggle_btc_filter':
-                        current = get_setting('btc_filter_enabled')
-                        if current is None:
-                            current = True
-                        set_setting('btc_filter_enabled', not current)
-                        text, markup = filters_keyboard()
-                        await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
-
-                    elif data == 'toggle_regime_filter':
-                        current = get_setting('regime_filter_enabled')
-                        if current is None:
-                            current = True
-                        set_setting('regime_filter_enabled', not current)
                         text, markup = filters_keyboard()
                         await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
 
@@ -1190,7 +1250,6 @@ async def handle_updates(bot, active_signals):
         except Exception as e:
             print(f"Помилка обробки оновлень: {e}")
             await asyncio.sleep(5)
-
 
 # ─────────────────────────────────────────────
 # MAIN LOOP

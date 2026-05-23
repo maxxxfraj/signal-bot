@@ -212,7 +212,14 @@ def check_signal_by_type(last, prev, df, symbol, timeframe, direction):
     return False
 
 
-async def check_higher_tf_bias(symbol, timeframe, direction):
+def log_skip(msg, scan_logs=None):
+    """Службовий помічник для запису в консоль та накопичувач логів"""
+    print(msg)
+    if scan_logs is not None:
+        scan_logs.append(msg)
+
+
+async def check_higher_tf_bias(symbol, timeframe, direction, scan_logs=None):
     if not get_setting('htf_bias_enabled'):
         return True
 
@@ -246,12 +253,19 @@ async def check_higher_tf_bias(symbol, timeframe, direction):
         diff_pct = abs((ema20 - ema50) / ema50) * 100
 
         if diff_pct < htf_diff_threshold:
+            log_skip(f"⛔ {symbol} {timeframe} {direction} — EMA тренд старшого ТФ занадто слабкий ({diff_pct:.2f}% < {htf_diff_threshold}%)", scan_logs)
             return False
 
         if direction == 'LONG':
-            return ema20 > ema50
+            is_ok = ema20 > ema50
+            if not is_ok:
+                log_skip(f"⛔ {symbol} {timeframe} LONG — тренд старшого ТФ {higher_tf} ведмежий (EMA20 < EMA50)", scan_logs)
+            return is_ok
         elif direction == 'SHORT':
-            return ema20 < ema50
+            is_ok = ema20 < ema50
+            if not is_ok:
+                log_skip(f"⛔ {symbol} {timeframe} SHORT — тренд старшого ТФ {higher_tf} бичачий (EMA20 > EMA50)", scan_logs)
+            return is_ok
 
         return True
 
@@ -260,7 +274,7 @@ async def check_higher_tf_bias(symbol, timeframe, direction):
         return True
 
 
-async def check_btc_and_correlation(symbol, timeframe, df_alt, direction):
+async def check_btc_and_correlation(symbol, timeframe, df_alt, direction, scan_logs=None):
     """Розрахунок лінійної кореляції Пірсона до BTC та трендовий фільтр Біткоїна"""
     btc_filt = get_setting('btc_filter_enabled')
     if btc_filt is None:
@@ -289,10 +303,10 @@ async def check_btc_and_correlation(symbol, timeframe, df_alt, direction):
             btc_bullish = ema20_btc > ema50_btc
             
             if direction == 'LONG' and not btc_bullish:
-                print(f"⛔ {symbol} — фільтр BTC заблокував LONG (BTC у спадному тренді)")
+                log_skip(f"⛔ {symbol} — фільтр BTC заблокував LONG (BTC у спадному тренді)", scan_logs)
                 return False, correlation
             elif direction == 'SHORT' and btc_bullish:
-                print(f"⛔ {symbol} — фільтр BTC заблокував SHORT (BTC у висхідному тренді)")
+                log_skip(f"⛔ {symbol} — фільтр BTC заблокував SHORT (BTC у висхідному тренді)", scan_logs)
                 return False, correlation
 
         return True, round(correlation, 2)
@@ -301,7 +315,7 @@ async def check_btc_and_correlation(symbol, timeframe, df_alt, direction):
         return True, 0.0
 
 
-async def find_signal(symbol, timeframe):
+async def find_signal(symbol, timeframe, scan_logs=None):
     # Динамічно збільшуємо ліміт свічок для дрібних таймфреймів
     limit = 1000
     if timeframe == '5m':
@@ -358,21 +372,21 @@ async def find_signal(symbol, timeframe):
             mean_reversion_strategies = ['bb_bounce', 'mean_reversion']
             
             if strategy_type in trend_strategies and latest_adx < 20:
-                print(f"⛔ {symbol} {timeframe} {direction} — ринок у флеті (ADX={latest_adx:.1f} < 20), трендовий вхід заблоковано")
+                log_skip(f"⛔ {symbol} {timeframe} {direction} — ринок у флеті (ADX={latest_adx:.1f} < 20), трендовий вхід заблоковано", scan_logs)
                 return None
             elif strategy_type in mean_reversion_strategies and latest_adx > 25:
-                print(f"⛔ {symbol} {timeframe} {direction} — сильний тренд (ADX={latest_adx:.1f} > 25), контртрендовий вхід заблоковано")
+                log_skip(f"⛔ {symbol} {timeframe} {direction} — сильний тренд (ADX={latest_adx:.1f} > 25), контртрендовий вхід заблоковано", scan_logs)
                 return None
         except Exception as e:
             print(f"Помилка розрахунку фільтра ринкового режиму для {symbol}: {e}")
 
     # 2. Фільтр тренду BTC та розрахунок лінійної кореляції Пірсона
-    btc_pass, correlation = await check_btc_and_correlation(symbol, timeframe, df, direction)
+    btc_pass, correlation = await check_btc_and_correlation(symbol, timeframe, df, direction, scan_logs)
     if not btc_pass:
         return None
 
     # Перевірка тренду на старшому таймфреймі
-    bias_ok = await check_higher_tf_bias(symbol, timeframe, direction)
+    bias_ok = await check_higher_tf_bias(symbol, timeframe, direction, scan_logs)
     if not bias_ok:
         return None
 
@@ -423,14 +437,14 @@ async def find_signal(symbol, timeframe):
     )
 
     if not stats or not stats.get('is_valid', False):
-        print(f"⛔ {symbol} {timeframe} {direction} — слабка стратегія на бектесті, пропускаємо")
+        log_skip(f"⛔ {symbol} {timeframe} {direction} — слабка стратегія на бектесті, пропускаємо", scan_logs)
         return None
 
     min_prob = get_setting('min_tp1_prob')
     tp1_prob = stats['tp_probs'][0] if stats['count'] > 0 else 0
 
     if tp1_prob < min_prob:
-        print(f"⛔ {symbol} {timeframe} {direction} — ймовірність TP1 ({tp1_prob}%) менша за мінімальну ({min_prob}%), пропускаємо")
+        log_skip(f"⛔ {symbol} {timeframe} {direction} — ймовірність TP1 ({tp1_prob}%) менша за мінімальну ({min_prob}%), пропускаємо", scan_logs)
         return None
 
     if stats['count'] > 0:
@@ -463,7 +477,7 @@ async def find_signal(symbol, timeframe):
     }
 
 
-async def scan_all(timeframes=None):
+async def scan_all(timeframes=None, scan_logs=None):
     if timeframes is None:
         timeframes = get_setting('active_timeframes')
 
@@ -477,7 +491,7 @@ async def scan_all(timeframes=None):
         async with sem:
             # Мікро-пауза між запусками для згладжування навантаження на API
             await asyncio.sleep(0.2)
-            return await find_signal(symbol, timeframe)
+            return await find_signal(symbol, timeframe, scan_logs=scan_logs)
 
     tasks = [
         sem_find_signal(symbol, timeframe)
