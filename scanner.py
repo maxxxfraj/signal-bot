@@ -274,15 +274,18 @@ async def check_higher_tf_bias(symbol, timeframe, direction, scan_logs=None):
         return True
 
 
-async def check_btc_and_correlation(symbol, timeframe, df_alt, direction, scan_logs=None):
-    """Розрахунок лінійної кореляції Пірсона до BTC та трендовий фільтр Біткоїна"""
+async def check_btc_and_correlation(symbol, timeframe, df_alt, direction, scan_logs=None, btc_df=None):
+    """Розрахунок лінійної кореляції Пірсона до BTC та трендовий фільтр Біткоїна (з підтримкою кешування)"""
     btc_filt = get_setting('btc_filter_enabled')
     if btc_filt is None:
         btc_filt = True
         
     try:
-        # Завантажуємо свічки BTC/USDT на аналогічному таймфреймі
-        df_btc = await get_candles('BTC/USDT', timeframe, limit=len(df_alt))
+        # ОПТИМІЗАЦІЯ: Якщо свічки BTC вже завантажені в глобальний кеш scan_all(), ми не робимо повторних запитів до мережі!
+        df_btc = btc_df
+        if df_btc is None:
+            df_btc = await get_candles('BTC/USDT', timeframe, limit=len(df_alt))
+            
         if df_btc is None or len(df_btc) < 50:
             return True, 0.0
 
@@ -315,7 +318,7 @@ async def check_btc_and_correlation(symbol, timeframe, df_alt, direction, scan_l
         return True, 0.0
 
 
-async def find_signal(symbol, timeframe, scan_logs=None):
+async def find_signal(symbol, timeframe, scan_logs=None, btc_df=None):
     # Динамічно збільшуємо ліміт свічок для дрібних таймфреймів
     limit = 1000
     if timeframe == '5m':
@@ -380,8 +383,8 @@ async def find_signal(symbol, timeframe, scan_logs=None):
         except Exception as e:
             print(f"Помилка розрахунку фільтра ринкового режиму для {symbol}: {e}")
 
-    # 2. Фільтр тренду BTC та розрахунок лінійної кореляції Пірсона
-    btc_pass, correlation = await check_btc_and_correlation(symbol, timeframe, df, direction, scan_logs)
+    # 2. Фільтр тренду BTC та розрахунок лінійної кореляції Пірсона (передаємо кешований btc_df)
+    btc_pass, correlation = await check_btc_and_correlation(symbol, timeframe, df, direction, scan_logs, btc_df)
     if not btc_pass:
         return None
 
@@ -483,6 +486,18 @@ async def scan_all(timeframes=None, scan_logs=None):
 
     watchlist = get_setting('watchlist')
 
+    # 1. ГЛОБАЛЬНИЙ КЕШ: Завантажуємо свічки BTC/USDT один раз для кожного таймфрейму
+    # Це економить до 90% мережевого трафіку та запобігає бану лімітів API
+    btc_candles_map = {}
+    for tf in timeframes:
+        try:
+            limit = 6000 if tf == '5m' else (4000 if tf == '15m' else 1000)
+            btc_df = await get_candles('BTC/USDT', tf, limit=limit)
+            if btc_df is not None and len(btc_df) >= 50:
+                btc_candles_map[tf] = btc_df
+        except Exception as e:
+            print(f"Помилка завантаження глобального кешу BTC для {tf}: {e}")
+
     # Семафор обмежує кількість ОДНОЧАСНИХ асинхронних завдань сканування (наприклад, максимум 3)
     # Це захищає Render від вичерпання RAM (OOM) та запобігає бану лімітів API (HTTP 429)
     sem = asyncio.Semaphore(3)
@@ -491,7 +506,8 @@ async def scan_all(timeframes=None, scan_logs=None):
         async with sem:
             # Мікро-пауза між запусками для згладжування навантаження на API
             await asyncio.sleep(0.2)
-            return await find_signal(symbol, timeframe, scan_logs=scan_logs)
+            btc_df = btc_candles_map.get(timeframe)
+            return await find_signal(symbol, timeframe, scan_logs=scan_logs, btc_df=btc_df)
 
     tasks = [
         sem_find_signal(symbol, timeframe)

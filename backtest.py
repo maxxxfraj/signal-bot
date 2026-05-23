@@ -145,8 +145,15 @@ def run_backtest(df, direction, ema_fast=20, ema_slow=50, rsi_min=32, rsi_max=60
         direction = direction.upper()
         df = df.copy()
 
-        # Розраховуємо індикатори під конкретні параметри стратегії
-        df = calculate_indicators(df, ema_fast, ema_slow)
+        # ОПТИМІЗАЦІЯ: Якщо базові індикатори вже розраховані у scanner.py,
+        # ми просто використовуємо їх і економимо купу процесорного часу!
+        if 'rsi' not in df.columns or 'atr' not in df.columns:
+            df = calculate_indicators(df, ema_fast, ema_slow)
+        else:
+            # Розраховуємо тільки динамічні EMA під параметри конкретної стратегії
+            df['ema_fast'] = ta.trend.ema_indicator(df['close'], window=ema_fast)
+            df['ema_slow'] = ta.trend.ema_indicator(df['close'], window=ema_slow)
+
         df = df.dropna()
 
         if len(df) < 100:
@@ -283,9 +290,9 @@ def run_backtest(df, direction, ema_fast=20, ema_slow=50, rsi_min=32, rsi_max=60
             'stop_rate': stop_rate,
             'tp_probs': [tp1_prob, tp2_prob, tp3_prob, tp4_prob],
             'is_valid': (
-            total >= min_trades and
-            tp1_prob >= min_prob and  # <--- Тепер тут стоїть динамічний параметр!
-            avg_pnl > 0
+                total >= min_trades and
+                tp1_prob >= min_prob and
+                avg_pnl > 0
             ),
         }
 
