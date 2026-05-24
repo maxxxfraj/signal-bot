@@ -1,3 +1,4 @@
+# scanner.py
 import ccxt.async_support as ccxt
 import pandas as pd
 import ta
@@ -5,7 +6,7 @@ import os
 import json
 import asyncio
 from backtest import run_backtest
-from settings import get_setting, get_exchange_client  # Додано імпорт клієнта
+from settings import get_setting, get_exchange_client, to_native_float, to_native_int
 
 # Ініціалізація динамічного асинхронного клієнта біржі (Binance або MEXC)
 exchange = get_exchange_client(async_mode=True)
@@ -14,10 +15,8 @@ CONFIG_FILE = 'strategy_config.json'
 _config_cache = {}
 _config_mtime = 0
 
-# Створюємо глобальний асинхронний замок для завантаження ринків
 _load_markets_lock = asyncio.Lock()
 
-# Безпечні дефолтні параметри
 SAFE_DEFAULTS = {
     'SHORT': {
         'ema_fast': 20, 'ema_slow': 50,
@@ -87,10 +86,20 @@ async def get_candles(symbol, timeframe, limit=1000):
 
 
 def calculate_indicators(df):
-    # Розрахунок базових індикаторів
     df['ema20'] = ta.trend.ema_indicator(df['close'], window=20)
     df['ema50'] = ta.trend.ema_indicator(df['close'], window=50)
     df['rsi'] = ta.momentum.rsi(df['close'], window=14)
+
+    ap = (df['high'] + df['low'] + df['close']) / 3.0
+    esa = ta.trend.ema_indicator(ap, window=10)
+    d = ta.trend.ema_indicator(abs(ap - esa), window=10)
+    
+    d_val = d.copy()
+    d_val[d_val == 0] = 0.000001
+    
+    ci = (ap - esa) / (0.015 * d_val)
+    df['wt1'] = ta.trend.ema_indicator(ci, window=21)
+    df['wt2'] = df['wt1'].rolling(window=4).mean()
 
     macd = ta.trend.MACD(df['close'], window_fast=12, window_slow=26, window_sign=9)
     df['macd'] = macd.macd()
@@ -138,7 +147,7 @@ def check_signal_by_type(last, prev, df, symbol, timeframe, direction):
             ema_cross = ema_f > ema_s
             macd_ok = last['macd'] > last['macd_signal']
             volume_ok = last['volume'] > last['volume_ma'] * 0.7
-            bb_ok = last['close'] < last['bb_mid']
+            bb_ok = last['close'] > last['bb_mid']
             confirmations = sum([ema_cross, macd_ok, volume_ok, bb_ok])
             return trend and rsi_ok and candle and confirmations >= 2
 
@@ -164,10 +173,26 @@ def check_signal_by_type(last, prev, df, symbol, timeframe, direction):
                     last['rsi'] < rsi_max and
                     last['close'] > last['open'])
 
+    elif strategy_type == 'wavetrend_bounce':
+        dot_level = 45
+        wt1_last = df['wt1'].iloc[-2]
+        wt2_last = df['wt2'].iloc[-2]
+        wt1_prev = df['wt1'].iloc[-3]
+        wt2_prev = df['wt2'].iloc[-3]
+        
+        if direction == 'SHORT':
+            return (wt1_prev > wt2_prev and 
+                    wt1_last < wt2_last and 
+                    wt1_last > dot_level)
+        else:
+            return (wt1_prev < wt2_prev and 
+                    wt1_last > wt2_last and 
+                    wt1_last < -dot_level)
+
     elif strategy_type == 'breakout':
         high_20 = df['high'].rolling(20).max().iloc[-2]
         low_20 = df['low'].rolling(20).min().iloc[-2]
-        if direction == 'LONG':  # Виправлена неінвертована логіка
+        if direction == 'LONG':
             return (prev['close'] < high_20 and
                     last['close'] > high_20 and
                     last['volume'] > last['volume_ma'] * 1.5 and
@@ -213,7 +238,6 @@ def check_signal_by_type(last, prev, df, symbol, timeframe, direction):
 
 
 def log_skip(msg, scan_logs=None):
-    """Службовий помічник для запису в консоль та накопичувач логів"""
     print(msg)
     if scan_logs is not None:
         scan_logs.append(msg)
@@ -275,13 +299,11 @@ async def check_higher_tf_bias(symbol, timeframe, direction, scan_logs=None):
 
 
 async def check_btc_and_correlation(symbol, timeframe, df_alt, direction, scan_logs=None, btc_df=None):
-    """Розрахунок лінійної кореляції Пірсона до BTC та трендовий фільтр Біткоїна (з підтримкою кешування)"""
     btc_filt = get_setting('btc_filter_enabled')
     if btc_filt is None:
         btc_filt = True
         
     try:
-        # ОПТИМІЗАЦІЯ: Якщо свічки BTC вже завантажені в глобальний кеш scan_all(), ми не робимо повторних запитів до мережі!
         df_btc = btc_df
         if df_btc is None:
             df_btc = await get_candles('BTC/USDT', timeframe, limit=len(df_alt))
@@ -289,7 +311,6 @@ async def check_btc_and_correlation(symbol, timeframe, df_alt, direction, scan_l
         if df_btc is None or len(df_btc) < 50:
             return True, 0.0
 
-        # Розрахунок кореляції Пірсона через Pandas (з вирівнюванням індексів) [4]
         df_alt_aligned, df_btc_aligned = df_alt.align(df_btc, join='inner', axis=0)
         returns_alt = df_alt_aligned['close'].pct_change().dropna()
         returns_btc = df_btc_aligned['close'].pct_change().dropna()
@@ -298,7 +319,6 @@ async def check_btc_and_correlation(symbol, timeframe, df_alt, direction, scan_l
         if pd.isna(correlation):
             correlation = 0.0
 
-        # Трендовий фільтр BTC
         if btc_filt:
             ema20_btc = ta.trend.ema_indicator(df_btc['close'], window=20).iloc[-1]
             ema50_btc = ta.trend.ema_indicator(df_btc['close'], window=50).iloc[-1]
@@ -319,18 +339,31 @@ async def check_btc_and_correlation(symbol, timeframe, df_alt, direction, scan_l
 
 
 async def find_signal(symbol, timeframe, scan_logs=None, btc_df=None):
-    # Динамічно збільшуємо ліміт свічок для дрібних таймфреймів
+    open_interest = None
+    funding_rate = None
+
+    scalp_enabled = get_setting('scalper_mode_enabled')
+    if scalp_enabled is None:
+        scalp_enabled = True
+        
+    if not scalp_enabled and timeframe in ['5m', '15m', '30m', '1h']:
+        return None
+
+    exchange_name = get_setting('exchange_name') or 'binance'
     limit = 1000
-    if timeframe == '5m':
-        limit = 6000   # ~20 днів історії для 5m, щоб назбирати угоди для бектесту
-    elif timeframe == '15m':
-        limit = 4000   # ~41 день історії для 15m
+    
+    if exchange_name == 'binance':
+        if timeframe == '5m':
+            limit = 6000
+        elif timeframe == '15m':
+            limit = 4000
+    else:
+        limit = 1000
 
     df = await get_candles(symbol, timeframe, limit=limit)
     if df is None or len(df) < 60:
         return None
 
-    # Асинхронний виклик важких розрахунків індикаторів
     df = await asyncio.to_thread(calculate_indicators, df)
     df = df.dropna()
 
@@ -357,22 +390,23 @@ async def find_signal(symbol, timeframe, scan_logs=None, btc_df=None):
     if direction is None:
         return None
 
-    # 1. Фільтр ринкового режиму ADX (Trending vs flat)
+    ema_fast, ema_slow, rsi_min, rsi_max, strategy_type = get_params(symbol, timeframe, direction)
+
+    is_scalp_strategy = strategy_type in ['wavetrend_bounce', 'bb_bounce', 'mean_reversion']
+    is_scalp_tf = timeframe in ['5m', '15m', '30m', '1h']
+    mode = 'scalp' if (is_scalp_strategy or is_scalp_tf) else 'swing'
+
     regime_filter = get_setting('regime_filter_enabled')
     if regime_filter is None:
         regime_filter = True
         
     if regime_filter:
         try:
-            # Отримуємо тип стратегії сигналу
-            _, _, _, _, strategy_type = get_params(symbol, timeframe, direction)
-            
-            # Рахуємо силу тренду через ADX
             adx_series = ta.trend.adx(df['high'], df['low'], df['close'], window=14)
             latest_adx = adx_series.iloc[-1]
             
             trend_strategies = ['ema_rsi', 'macd_cross', 'breakout', 'vol_spike']
-            mean_reversion_strategies = ['bb_bounce', 'mean_reversion']
+            mean_reversion_strategies = ['bb_bounce', 'mean_reversion', 'wavetrend_bounce']
             
             if strategy_type in trend_strategies and latest_adx < 20:
                 log_skip(f"⛔ {symbol} {timeframe} {direction} — ринок у флеті (ADX={latest_adx:.1f} < 20), трендовий вхід заблоковано", scan_logs)
@@ -383,20 +417,16 @@ async def find_signal(symbol, timeframe, scan_logs=None, btc_df=None):
         except Exception as e:
             print(f"Помилка розрахунку фільтра ринкового режиму для {symbol}: {e}")
 
-    # 2. Фільтр тренду BTC та розрахунок лінійної кореляції Пірсона (передаємо кешований btc_df)
     btc_pass, correlation = await check_btc_and_correlation(symbol, timeframe, df, direction, scan_logs, btc_df)
     if not btc_pass:
         return None
 
-    # Перевірка тренду на старшому таймфреймі
     bias_ok = await check_higher_tf_bias(symbol, timeframe, direction, scan_logs)
     if not bias_ok:
         return None
 
     entry = round(price, 6)
 
-    # Отримуємо параметри поточної стратегії
-    ema_fast, ema_slow, rsi_min, rsi_max, strategy_type = get_params(symbol, timeframe, direction)
     stop_mult = get_setting('stop_atr_mult')
     tp1_mult = get_setting('tp1_atr_mult')
 
@@ -421,10 +451,12 @@ async def find_signal(symbol, timeframe, scan_logs=None, btc_df=None):
             (round(entry + atr * (tp1_mult + 2.2), 6), 40, round(atr * (tp1_mult + 2.2) / entry * 100, 1)),
         ]
 
-    # Визначаємо мінімальну кількість угод для бектесту
-    min_trades = 12 if timeframe in ['5m', '15m', '30m'] else 20
+    exchange_name = get_setting('exchange_name') or 'binance'
+    if exchange_name == 'mexc':
+        min_trades = 6 if timeframe in ['5m', '15m', '30m'] else 10
+    else:
+        min_trades = 12 if timeframe in ['5m', '15m', '30m'] else 20
 
-    # Швидкий бектест у фоновому потоці
     stats = await asyncio.to_thread(
         run_backtest,
         df, direction,
@@ -450,53 +482,73 @@ async def find_signal(symbol, timeframe, scan_logs=None, btc_df=None):
         log_skip(f"⛔ {symbol} {timeframe} {direction} — ймовірність TP1 ({tp1_prob}%) менша за мінімальну ({min_prob}%), пропускаємо", scan_logs)
         return None
 
-    # 3. НОВИЙ БЛОК: Запит Фандингу та Відкритого Інтересу (Тільки для повністю валідних угод!) [1]
-    open_interest = None
-    funding_rate = None
+    ccxt_symbol = f"{symbol}:USDT"
     
-    # Визначаємо правильний символ під активну біржу
-    ccxt_symbol = symbol[:-4] + '/USDT:USDT' if get_setting('exchange_name') == 'mexc' else symbol
-    
-    # Розумний Фандинг Фільтр [1]
     funding_filt = get_setting('funding_filter_enabled')
     if funding_filt is None:
         funding_filt = True
     funding_max_pct = get_setting('funding_max_limit') or 0.05
     
     try:
-        # fetch_funding_rate повертає поточну ставку фінансування деривативу
         funding_data = await exchange.fetch_funding_rate(ccxt_symbol)
-        funding_rate = funding_data.get('fundingRate') # повертається як абсолютне число, наприклад 0.0001 (0.01%)
-        
-        if funding_rate is not None and funding_filt:
-            funding_rate_pct = funding_rate * 100.0
-            
-            # Якщо лонг, але фандинг занадто гарячий у бік лонгів (лонгісти перегріті) [1]
-            if direction == 'LONG' and funding_rate_pct >= funding_max_pct:
-                log_skip(f"⛔ {symbol} — Фільтр фандингу заблокував LONG (Перегрів покупців: {funding_rate_pct:.3f}% >= {funding_max_pct}%)", scan_logs)
-                return None
-            # Якщо шорт, але фандинг занадто негативний у бік шортів (шортисти перегріті) [1]
-            elif direction == 'SHORT' and funding_rate_pct <= -funding_max_pct:
-                log_skip(f"⛔ {symbol} — Фільтр фандингу заблокував SHORT (Перегрів продавців: {funding_rate_pct:.3f}% <= -{funding_max_pct}%)", scan_logs)
-                return None
+        funding_rate = funding_data.get('fundingRate')
+    except ccxt.BadSymbol:
+        try:
+            ccxt_symbol_fallback = symbol
+            funding_data = await exchange.fetch_funding_rate(ccxt_symbol_fallback)
+            funding_rate = funding_data.get('fundingRate')
+        except Exception as e:
+            print(f"Помилка отримання Funding Rate (fallback) для {symbol}: {e}")
     except Exception as e:
         print(f"Помилка отримання Funding Rate для {symbol}: {e}")
         
+    if funding_rate is not None and funding_filt:
+        funding_rate_pct = funding_rate * 100.0
+        if direction == 'LONG' and funding_rate_pct >= funding_max_pct:
+            log_skip(f"⛔ {symbol} — Фільтр фандингу заблокував LONG (Перегрів покупців: {funding_rate_pct:.3f}% >= {funding_max_pct}%)", scan_logs)
+            return None
+        elif direction == 'SHORT' and funding_rate_pct <= -funding_max_pct:
+            log_skip(f"⛔ {symbol} — Фільтр фандингу заблокував SHORT (Перегрів продавців: {funding_rate_pct:.3f}% <= -{funding_max_pct}%)", scan_logs)
+            return None
+        
     try:
-        # fetch_open_interest повертає поточний Відкритий Інтерес (OI) [1]
+        ccxt_symbol = f"{symbol}:USDT"
         oi_data = await exchange.fetch_open_interest(ccxt_symbol)
-        open_interest = oi_data.get('openInterestValue') # сумарне значення відкритого деривативного об'єму в USDT
+        oi_val = to_native_float(oi_data.get('openInterestValue'))
+        oi_amount = to_native_float(oi_data.get('openInterestAmount'))
+        
+        if oi_val is not None:
+            open_interest = oi_val
+        elif oi_amount is not None:
+            open_interest = oi_amount * price
+        else:
+            open_interest = None
+            
+    except ccxt.BadSymbol:
+        try:
+            ccxt_symbol_fallback = symbol
+            oi_data = await exchange.fetch_open_interest(ccxt_symbol_fallback)
+            oi_val = to_native_float(oi_data.get('openInterestValue'))
+            oi_amount = to_native_float(oi_data.get('openInterestAmount'))
+            
+            if oi_val is not None:
+                open_interest = oi_val
+            elif oi_amount is not None:
+                open_interest = oi_amount * price
+            else:
+                open_interest = None
+        except Exception as e:
+            open_interest = None
     except Exception as e:
-        print(f"Помилка отримання Open Interest для {symbol}: {e}")
+        open_interest = None
 
-    # Розумний Фільтр мінімального Відкритого Інтересу (OI) [1]
     oi_filt = get_setting('oi_filter_enabled')
     if oi_filt is None:
         oi_filt = True
     oi_min_limit = get_setting('oi_min_limit') or 10.0
     
     if open_interest is not None and oi_filt:
-        oi_m = open_interest / 1000000.0  # Переводимо в мільйони доларів ($M)
+        oi_m = open_interest / 1000000.0
         if oi_m < oi_min_limit:
             log_skip(f"⛔ {symbol} — Фільтр мінімального OI заблокував сигнал (Низька деривативна ліквідність: ${oi_m:.2f}M < ${oi_min_limit:.1f}M)", scan_logs)
             return None
@@ -528,8 +580,9 @@ async def find_signal(symbol, timeframe, scan_logs=None, btc_df=None):
         'tier': tier,
         'stop_loss': stop_loss,
         'correlation': correlation,
-        'funding_rate': funding_rate * 100.0 if funding_rate is not None else None, # Записуємо у відсотках
-        'open_interest': open_interest # Значення в USDT
+        'funding_rate': funding_rate * 100.0 if funding_rate is not None else None,
+        'open_interest': open_interest,
+        'mode': mode
     }
 
 
@@ -539,8 +592,6 @@ async def scan_all(timeframes=None, scan_logs=None):
 
     watchlist = get_setting('watchlist')
 
-    # 1. ГЛОБАЛЬНИЙ КЕШ: Завантажуємо свічки BTC/USDT один раз для кожного таймфрейму
-    # Це економить до 90% мережевого трафіку та запобігає бану лімітів API
     btc_candles_map = {}
     for tf in timeframes:
         try:
@@ -551,13 +602,10 @@ async def scan_all(timeframes=None, scan_logs=None):
         except Exception as e:
             print(f"Помилка завантаження глобального кешу BTC для {tf}: {e}")
 
-    # Семафор обмежує кількість ОДНОЧАСНИХ асинхронних завдань сканування (наприклад, максимум 3)
-    # Це захищає Render від вичерпання RAM (OOM) та запобігає бану лімітів API (HTTP 429)
     sem = asyncio.Semaphore(3)
 
     async def sem_find_signal(symbol, timeframe):
         async with sem:
-            # Мікро-пауза між запусками для згладжування навантаження на API
             await asyncio.sleep(0.2)
             btc_df = btc_candles_map.get(timeframe)
             return await find_signal(symbol, timeframe, scan_logs=scan_logs, btc_df=btc_df)

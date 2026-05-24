@@ -100,11 +100,11 @@
     },
     "1h": {
       "LONG": {
-        "ema_fast": 8,
-        "ema_slow": 30,
+        "ema_fast": 10,
+        "ema_slow": 60,
         "rsi_min": 25,
         "rsi_max": 60,
-        "score": 68.43,
+        "score": 78.22,
         "strategy_type": "ema_rsi"
       }
     }
@@ -134,7 +134,17 @@
         "ema_slow": 30,
         "rsi_min": 25,
         "rsi_max": 60,
-        "score": 68.67,
+        "score": 68.45,
+        "strategy_type": "ema_rsi"
+      }
+    },
+    "1h": {
+      "LONG": {
+        "ema_fast": 8,
+        "ema_slow": 50,
+        "rsi_min": 25,
+        "rsi_max": 65,
+        "score": 69.23,
         "strategy_type": "ema_rsi"
       }
     }
@@ -165,6 +175,16 @@
         "rsi_min": 30,
         "rsi_max": 60,
         "score": 55.42
+      }
+    },
+    "1d": {
+      "SHORT": {
+        "ema_fast": 12,
+        "ema_slow": 30,
+        "rsi_min": 40,
+        "rsi_max": 60,
+        "score": 57.46,
+        "strategy_type": "ema_rsi"
       }
     }
   },
@@ -198,11 +218,11 @@
     },
     "1h": {
       "LONG": {
-        "ema_fast": 8,
+        "ema_fast": 20,
         "ema_slow": 30,
         "rsi_min": 25,
         "rsi_max": 60,
-        "score": 72.35,
+        "score": 69.97,
         "strategy_type": "ema_rsi"
       }
     }
@@ -219,11 +239,21 @@
     },
     "1h": {
       "LONG": {
-        "ema_fast": 15,
+        "ema_fast": 10,
         "ema_slow": 30,
         "rsi_min": 25,
         "rsi_max": 55,
-        "score": 84.72,
+        "score": 81.03,
+        "strategy_type": "ema_rsi"
+      }
+    },
+    "1d": {
+      "SHORT": {
+        "ema_fast": 25,
+        "ema_slow": 30,
+        "rsi_min": 45,
+        "rsi_max": 60,
+        "score": 55.99,
         "strategy_type": "ema_rsi"
       }
     }
@@ -329,23 +359,24 @@
     },
     "1h": {
       "LONG": {
-        "ema_fast": 8,
+        "ema_fast": 10,
         "ema_slow": 40,
         "rsi_min": 25,
         "rsi_max": 60,
-        "score": 77.76,
+        "score": 78.04,
         "strategy_type": "ema_rsi"
       }
     }
   },
   "UNIUSDT": {
     "5m": {
-      "LONG": {
-        "ema_fast": 15,
-        "ema_slow": 40,
-        "rsi_min": 30,
+      "SHORT": {
+        "ema_fast": 8,
+        "ema_slow": 50,
+        "rsi_min": 40,
         "rsi_max": 60,
-        "score": 44.91
+        "score": 89.87,
+        "strategy_type": "ema_rsi"
       }
     },
     "15m": {
@@ -358,12 +389,13 @@
       }
     },
     "30m": {
-      "LONG": {
-        "ema_fast": 25,
-        "ema_slow": 40,
-        "rsi_min": 30,
+      "SHORT": {
+        "ema_fast": 20,
+        "ema_slow": 30,
+        "rsi_min": 40,
         "rsi_max": 60,
-        "score": 57.72
+        "score": 70.71,
+        "strategy_type": "ema_rsi"
       }
     },
     "4h": {
@@ -373,6 +405,16 @@
         "rsi_min": 25,
         "rsi_max": 60,
         "score": 67.36,
+        "strategy_type": "ema_rsi"
+      }
+    },
+    "1d": {
+      "SHORT": {
+        "ema_fast": 25,
+        "ema_slow": 40,
+        "rsi_min": 40,
+        "rsi_max": 60,
+        "score": 51.66,
         "strategy_type": "ema_rsi"
       }
     }
@@ -401,8 +443,8 @@
         "ema_fast": 12,
         "ema_slow": 50,
         "rsi_min": 25,
-        "rsi_max": 60,
-        "score": 73.62,
+        "rsi_max": 65,
+        "score": 75.89,
         "strategy_type": "ema_rsi"
       }
     },
@@ -412,7 +454,7 @@
         "ema_slow": 30,
         "rsi_min": 40,
         "rsi_max": 60,
-        "score": 57.29,
+        "score": 58.38,
         "strategy_type": "ema_rsi"
       }
     }
@@ -438,11 +480,21 @@
     },
     "30m": {
       "SHORT": {
-        "ema_fast": 20,
+        "ema_fast": 15,
+        "ema_slow": 30,
+        "rsi_min": 40,
+        "rsi_max": 60,
+        "score": 68.51,
+        "strategy_type": "ema_rsi"
+      }
+    },
+    "1h": {
+      "SHORT": {
+        "ema_fast": 8,
         "ema_slow": 30,
         "rsi_min": 45,
         "rsi_max": 60,
-        "score": 70.57,
+        "score": 67.44,
         "strategy_type": "ema_rsi"
       }
     }
@@ -468,5 +520,356 @@
     }
   },
   "FILUSDT": {},
-  "updated_at": "2026-05-22T09:10:39.272165"
+  "updated_at": "2026-05-24T14:01:37.330877",
+  "SHIBUSDT": {},
+  "NEARUSDT": {
+    "5m": {
+      "SHORT": {
+        "ema_fast": 10,
+        "ema_slow": 50,
+        "rsi_min": 40,
+        "rsi_max": 60,
+        "score": 66.73,
+        "strategy_type": "ema_rsi"
+      }
+    },
+    "15m": {
+      "LONG": {
+        "ema_fast": 25,
+        "ema_slow": 60,
+        "rsi_min": 25,
+        "rsi_max": 65,
+        "score": 72.83,
+        "strategy_type": "ema_rsi"
+      }
+    },
+    "30m": {
+      "SHORT": {
+        "ema_fast": 8,
+        "ema_slow": 30,
+        "rsi_min": 40,
+        "rsi_max": 60,
+        "score": 66.86,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "TONUSDT": {
+    "1d": {
+      "SHORT": {
+        "ema_fast": 25,
+        "ema_slow": 40,
+        "rsi_min": 40,
+        "rsi_max": 60,
+        "score": 66.51,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "PEPEUSDT": {},
+  "SUIUSDT": {
+    "5m": {
+      "SHORT": {
+        "ema_fast": 25,
+        "ema_slow": 40,
+        "rsi_min": 40,
+        "rsi_max": 60,
+        "score": 71.17,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "WIFUSDT": {
+    "1h": {
+      "LONG": {
+        "ema_fast": 8,
+        "ema_slow": 50,
+        "rsi_min": 25,
+        "rsi_max": 65,
+        "score": 77.39,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "OPUSDT": {
+    "1h": {
+      "LONG": {
+        "ema_fast": 10,
+        "ema_slow": 60,
+        "rsi_min": 25,
+        "rsi_max": 65,
+        "score": 68.5,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "JUPUSDT": {
+    "1d": {
+      "LONG": {
+        "ema_fast": 8,
+        "ema_slow": 40,
+        "rsi_min": 25,
+        "rsi_max": 60,
+        "score": 54.83,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "RENDERUSDT": {
+    "1h": {
+      "LONG": {
+        "ema_fast": 12,
+        "ema_slow": 50,
+        "rsi_min": 25,
+        "rsi_max": 60,
+        "score": 71.87,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "GRTUSDT": {
+    "1h": {
+      "LONG": {
+        "ema_fast": 8,
+        "ema_slow": 60,
+        "rsi_min": 25,
+        "rsi_max": 60,
+        "score": 79.9,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "AAVEUSDT": {
+    "1h": {
+      "LONG": {
+        "ema_fast": 12,
+        "ema_slow": 50,
+        "rsi_min": 25,
+        "rsi_max": 60,
+        "score": 68.82,
+        "strategy_type": "ema_rsi"
+      }
+    },
+    "1d": {
+      "SHORT": {
+        "ema_fast": 8,
+        "ema_slow": 30,
+        "rsi_min": 40,
+        "rsi_max": 60,
+        "score": 53.25,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "INJUSDT": {
+    "1h": {
+      "LONG": {
+        "ema_fast": 12,
+        "ema_slow": 40,
+        "rsi_min": 25,
+        "rsi_max": 65,
+        "score": 64.2,
+        "strategy_type": "ema_rsi"
+      }
+    },
+    "4h": {
+      "LONG": {
+        "ema_fast": 8,
+        "ema_slow": 50,
+        "rsi_min": 25,
+        "rsi_max": 65,
+        "score": 66.41,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "ZROUSDT": {
+    "4h": {
+      "LONG": {
+        "ema_fast": 25,
+        "ema_slow": 40,
+        "rsi_min": 25,
+        "rsi_max": 60,
+        "score": 72.53,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "PYTHUSDT": {},
+  "PNUTUSDT": {
+    "15m": {
+      "SHORT": {
+        "ema_fast": 8,
+        "ema_slow": 50,
+        "rsi_min": 40,
+        "rsi_max": 60,
+        "score": 72.45,
+        "strategy_type": "ema_rsi"
+      }
+    },
+    "1h": {
+      "LONG": {
+        "ema_fast": 10,
+        "ema_slow": 30,
+        "rsi_min": 25,
+        "rsi_max": 60,
+        "score": 67.79,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "ORDIUSDT": {},
+  "ONDOUSDT": {
+    "15m": {
+      "LONG": {
+        "ema_fast": 25,
+        "ema_slow": 40,
+        "rsi_min": 25,
+        "rsi_max": 60,
+        "score": 70.88,
+        "strategy_type": "ema_rsi"
+      }
+    },
+    "1h": {
+      "LONG": {
+        "ema_fast": 12,
+        "ema_slow": 50,
+        "rsi_min": 25,
+        "rsi_max": 65,
+        "score": 67.77,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "ZECUSDT": {
+    "15m": {
+      "LONG": {
+        "ema_fast": 20,
+        "ema_slow": 30,
+        "rsi_min": 25,
+        "rsi_max": 60,
+        "score": 65.14,
+        "strategy_type": "ema_rsi"
+      }
+    },
+    "5m": {
+      "SHORT": {
+        "ema_fast": 15,
+        "ema_slow": 50,
+        "rsi_min": 45,
+        "rsi_max": 60,
+        "score": 86.5,
+        "strategy_type": "ema_rsi"
+      }
+    },
+    "1h": {
+      "LONG": {
+        "ema_fast": 25,
+        "ema_slow": 40,
+        "rsi_min": 25,
+        "rsi_max": 65,
+        "score": 72.95,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "BCHUSDT": {},
+  "ICPUSDT": {
+    "30m": {
+      "LONG": {
+        "ema_fast": 25,
+        "ema_slow": 30,
+        "rsi_min": 25,
+        "rsi_max": 60,
+        "score": 71.87,
+        "strategy_type": "ema_rsi"
+      }
+    },
+    "5m": {
+      "LONG": {
+        "ema_fast": 25,
+        "ema_slow": 30,
+        "rsi_min": 25,
+        "rsi_max": 55,
+        "score": 81.24,
+        "strategy_type": "ema_rsi"
+      }
+    },
+    "1h": {
+      "SHORT": {
+        "ema_fast": 25,
+        "ema_slow": 40,
+        "rsi_min": 40,
+        "rsi_max": 60,
+        "score": 69.45,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "WLDUSDT": {
+    "1d": {
+      "SHORT": {
+        "ema_fast": 10,
+        "ema_slow": 40,
+        "rsi_min": 40,
+        "rsi_max": 60,
+        "score": 58.32,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "XMRUSDT": {
+    "4h": {
+      "LONG": {
+        "ema_fast": 8,
+        "ema_slow": 60,
+        "rsi_min": 25,
+        "rsi_max": 60,
+        "score": 68.24,
+        "strategy_type": "ema_rsi"
+      }
+    },
+    "1h": {
+      "LONG": {
+        "ema_fast": 8,
+        "ema_slow": 50,
+        "rsi_min": 25,
+        "rsi_max": 60,
+        "score": 68.42,
+        "strategy_type": "ema_rsi"
+      }
+    },
+    "1d": {
+      "LONG": {
+        "ema_fast": 25,
+        "ema_slow": 30,
+        "rsi_min": 25,
+        "rsi_max": 55,
+        "score": 70.95,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  },
+  "XLMUSDT": {
+    "4h": {
+      "SHORT": {
+        "ema_fast": 12,
+        "ema_slow": 30,
+        "rsi_min": 40,
+        "rsi_max": 60,
+        "score": 74.91,
+        "strategy_type": "ema_rsi"
+      }
+    },
+    "1d": {
+      "SHORT": {
+        "ema_fast": 15,
+        "ema_slow": 60,
+        "rsi_min": 40,
+        "rsi_max": 60,
+        "score": 62.45,
+        "strategy_type": "ema_rsi"
+      }
+    }
+  }
 }

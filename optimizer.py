@@ -9,18 +9,13 @@ from itertools import product
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
-
-WATCHLIST = [
-    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT',
-    'XRP/USDT', 'DOGE/USDT', 'ADA/USDT', 'AVAX/USDT',
-    'DOT/USDT', 'POL/USDT', 'LINK/USDT', 'UNI/USDT',
-    'ATOM/USDT', 'LTC/USDT', 'ETC/USDT',
-]
+from settings import get_setting, ALL_PAIRS # Імпортуємо єдине джерело правди [1]
 
 TIMEFRAMES = ['5m', '15m', '30m', '1h', '4h', '1d']
 CONFIG_FILE = 'strategy_config.json'
 
 EMA_FAST_OPTIONS = [8, 10, 12, 15, 20, 25]
+print(f"Оптимізуємо {len(ALL_PAIRS)} пар.")
 EMA_SLOW_OPTIONS = [30, 40, 50, 60, 100]
 RSI_MIN_SHORT = [40, 45, 50, 55]
 RSI_MAX_SHORT = [60, 65, 70, 75, 80]
@@ -29,7 +24,8 @@ RSI_MAX_LONG = [50, 55, 60, 65]
 
 
 def get_candles_extended(symbol, timeframe, target=10000):
-    exchange = ccxt.binance({'enableRateLimit': True})
+    # Збираємо глибоку історію з ф'ючерсів Binance для максимальної точності [1]
+    exchange = ccxt.binanceusdm({'enableRateLimit': True})
     limit_per_request = 1000
     all_ohlcv = []
     since = None
@@ -90,6 +86,17 @@ def calculate_indicators(df, ema_fast, ema_slow):
     df['atr'] = ta.volatility.average_true_range(
         df['high'], df['low'], df['close'], window=14
     )
+    
+    # Розрахунок WaveTrend (MaStoDon) для оптимізації під нову скальперську стратегію [1]
+    ap = (df['high'] + df['low'] + df['close']) / 3.0
+    esa = ta.trend.ema_indicator(ap, window=10)
+    d = ta.trend.ema_indicator(abs(ap - esa), window=10)
+    d_val = d.copy()
+    d_val[d_val == 0] = 0.000001
+    ci = (ap - esa) / (0.015 * d_val)
+    df['wt1'] = ta.trend.ema_indicator(ci, window=21)
+    df['wt2'] = df['wt1'].rolling(window=4).mean()
+
     macd = ta.trend.MACD(df['close'])
     df['macd'] = macd.macd()
     df['macd_signal'] = macd.macd_signal()
@@ -138,15 +145,27 @@ def get_signal(row, prev, ema_fast, ema_slow, rsi_min, rsi_max, direction, strat
                     row['rsi'] < rsi_max and
                     row['close'] > row['open'])
 
-    elif strategy_type == 'breakout':
+    elif strategy_type == 'wavetrend_bounce':
+        # Підтримка оптимізації нової розворотної стратегії MaStoDon [1]
+        dot_level = 45
         if direction == 'SHORT':
+            return (prev['wt1'] > prev['wt2'] and 
+                    row['wt1'] < row['wt2'] and 
+                    row['wt1'] > dot_level)
+        else:
+            return (prev['wt1'] < prev['wt2'] and 
+                    row['wt1'] > row['wt2'] and 
+                    row['wt1'] < -dot_level)
+
+    elif strategy_type == 'breakout':
+        if direction == 'LONG':  # Виправлена неінвертована логіка
             return (prev['close'] < prev['high_20'] and
-                    row['close'] > row['high_20'] and
+                    row['close'] > prev['high_20'] and
                     row['volume'] > row['volume_ma'] * 1.5 and
                     row['rsi'] > rsi_min)
         else:
             return (prev['close'] > prev['low_20'] and
-                    row['close'] < row['low_20'] and
+                    row['close'] < prev['low_20'] and
                     row['volume'] > row['volume_ma'] * 1.5 and
                     row['rsi'] < rsi_max)
 
@@ -192,6 +211,10 @@ def backtest_strategy(df, ema_fast, ema_slow, rsi_min, rsi_max, direction, strat
     if len(df) < 100:
         return None
 
+    # ДИНАМІЧНИЙ РИЗИК-МЕНЕДЖМЕНТ: Зчитуємо ваші налаштування для правильного бектесту! [1]
+    stop_mult = get_setting('stop_atr_mult') or 2.0
+    tp1_mult = get_setting('tp1_atr_mult') or 0.8
+
     trades = []
 
     for i in range(50, len(df) - 30):
@@ -207,12 +230,14 @@ def backtest_strategy(df, ema_fast, ema_slow, rsi_min, rsi_max, direction, strat
             continue
 
         entry = row['close']
+        
+        # Динамічний розрахунок рівнів у симуляторі
         if direction == 'SHORT':
-            tp1 = entry - atr * 0.8
-            sl = entry + atr * 2.0
+            tp1 = entry - atr * tp1_mult
+            sl = entry + atr * stop_mult
         else:
-            tp1 = entry + atr * 0.8
-            sl = entry - atr * 2.0
+            tp1 = entry + atr * tp1_mult
+            sl = entry - atr * stop_mult
 
         future = df.iloc[i+1:i+31]
         tp1_hit = False
@@ -270,8 +295,8 @@ def backtest_strategy(df, ema_fast, ema_slow, rsi_min, rsi_max, direction, strat
     avg_dev = sum(t['max_dev'] for t in trades) / total
     avg_pnl = sum(t['net_pnl'] for t in trades) / total
 
-    profit = tp1_count * 0.8
-    loss = sl_count * 2.0
+    profit = tp1_count * tp1_mult
+    loss = sl_count * stop_mult
     profit_factor = profit / loss if loss > 0 else 999
 
     score = tp1_rate * 100 - sl_rate * 50 - avg_dev * 2
@@ -292,6 +317,9 @@ def validate_strategy(df, ema_fast, ema_slow, rsi_min, rsi_max, direction, strat
     if len(df) < 300:
         return False, 0
 
+    # ОПТИМІЗАЦІЯ: Зчитуємо ваш ліміт ймовірності з Telegram налаштувань [1]
+    min_prob = get_setting('min_tp1_prob') or 55
+
     mid = len(df) // 2
     r1 = backtest_strategy(df.iloc[:mid], ema_fast, ema_slow,
                            rsi_min, rsi_max, direction, strategy_type)
@@ -300,13 +328,16 @@ def validate_strategy(df, ema_fast, ema_slow, rsi_min, rsi_max, direction, strat
 
     if not r1 or not r2:
         return False, 0
-    if r1['tp1_rate'] < 55 or r2['tp1_rate'] < 55:
+        
+    # Застосовуємо динамічний ліміт ймовірності для обох частин історії [1]
+    if r1['tp1_rate'] < min_prob or r2['tp1_rate'] < min_prob:
         return False, 0
 
     fresh_start = int(len(df) * 0.8)
     r_fresh = backtest_strategy(df.iloc[fresh_start:], ema_fast, ema_slow,
                                 rsi_min, rsi_max, direction, strategy_type)
-    if not r_fresh or r_fresh['tp1_rate'] < 50:
+    # Свіжий відрізок історії має бути не гіршим за (ліміт - 5%) [1]
+    if not r_fresh or r_fresh['tp1_rate'] < (min_prob - 5):
         return False, 0
 
     period_size = len(df) // 4
@@ -315,7 +346,7 @@ def validate_strategy(df, ema_fast, ema_slow, rsi_min, rsi_max, direction, strat
         df_period = df.iloc[p*period_size:(p+1)*period_size]
         r_period = backtest_strategy(df_period, ema_fast, ema_slow,
                                      rsi_min, rsi_max, direction, strategy_type)
-        if r_period and r_period['tp1_rate'] >= 50:
+        if r_period and r_period['tp1_rate'] >= (min_prob - 5):
             good_periods += 1
 
     if good_periods < 3:
@@ -332,7 +363,7 @@ def validate_strategy(df, ema_fast, ema_slow, rsi_min, rsi_max, direction, strat
 def optimize_symbol(symbol, timeframe, df):
     best_results = {}
     strategy_types = [
-        'ema_rsi', 'macd_cross', 'bb_bounce',
+        'ema_rsi', 'macd_cross', 'bb_bounce', 'wavetrend_bounce', # Додано WaveTrend для оптимізації [1]
         'breakout', 'vol_spike', 'mean_reversion', 'rsi_div'
     ]
 
@@ -390,7 +421,7 @@ def worker_task(args):
 def run_optimizer():
     print("🚀 Запуск паралельного оптимізатора (10000 свічок)...")
     print(f"Час: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    print(f"Пар: {len(WATCHLIST)} × Таймфреймів: {len(TIMEFRAMES)} = {len(WATCHLIST)*len(TIMEFRAMES)} задач")
+    print(f"Пар: {len(ALL_PAIRS)} × Таймфреймів: {len(TIMEFRAMES)} = {len(ALL_PAIRS)*len(TIMEFRAMES)} задач")
 
     cpu_cores = multiprocessing.cpu_count()
     workers = max(1, cpu_cores // 2)
@@ -405,7 +436,7 @@ def run_optimizer():
         except Exception:
             config = {}
 
-    tasks = [(s, tf) for s in WATCHLIST for tf in TIMEFRAMES]
+    tasks = [(s, tf) for s in ALL_PAIRS for tf in TIMEFRAMES]
     total = len(tasks)
     done = 0
     found_long = 0

@@ -12,6 +12,19 @@ def calculate_indicators(df, ema_fast=20, ema_slow=50):
     df['ema_fast'] = ta.trend.ema_indicator(df['close'], window=ema_fast)
     df['ema_slow'] = ta.trend.ema_indicator(df['close'], window=ema_slow)
 
+    # === РОЗРАХУНОК WAVETREND OSCILLATOR (MaStoDon) [1] ===
+    ap = (df['high'] + df['low'] + df['close']) / 3.0
+    esa = ta.trend.ema_indicator(ap, window=10) # channelLength = 10
+    d = ta.trend.ema_indicator(abs(ap - esa), window=10)
+    
+    # Захист від ділення на нуль
+    d_val = d.copy()
+    d_val[d_val == 0] = 0.000001
+    
+    ci = (ap - esa) / (0.015 * d_val)
+    df['wt1'] = ta.trend.ema_indicator(ci, window=21) # averageLength = 21
+    df['wt2'] = df['wt1'].rolling(window=4).mean() # sma(wt1, 4)
+
     # Стандартні індикатори для додаткових підтверджень
     df['rsi'] = ta.momentum.rsi(df['close'], window=14)
     df['atr'] = ta.volatility.average_true_range(
@@ -92,6 +105,21 @@ def get_backtest_signal(row, prev, ema_fast, ema_slow, rsi_min, rsi_max, directi
                     row['rsi'] < rsi_max and
                     row['close'] > row['open'])
 
+    elif strategy_type == 'wavetrend_bounce':
+        # === МАТЕМАТИЧНЕ ДЗЕРКАЛО MaStoDon DOTS (Filtered Dots) [1] ===
+        dot_level = 45  # Порогова лінія перекупленості/перепроданності з налаштувань Pine Script [1]
+        
+        if direction == 'SHORT':
+            # wt1 перетинає wt2 зверху вниз (crossunder) вище за поріг перекупленості (+45) [1]
+            return (prev['wt1'] > prev['wt2'] and 
+                    row['wt1'] < row['wt2'] and 
+                    row['wt1'] > dot_level)
+        else:
+            # wt1 перетинає wt2 знизу вгору (crossover) нижче за поріг перепроданності (-45) [1]
+            return (prev['wt1'] < prev['wt2'] and 
+                    row['wt1'] > row['wt2'] and 
+                    row['wt1'] < -dot_level)
+
     elif strategy_type == 'breakout':
         # Неінвертована логіка пробоїв
         if direction == 'LONG':
@@ -169,7 +197,7 @@ def run_backtest(df, direction, ema_fast=20, ema_slow=50, rsi_min=32, rsi_max=60
             if pd.isna(atr) or atr == 0:
                 continue
 
-            # Визначаємо сигнал на основі активної стратегії
+            # Визначаємо сигнал на основі active стратегії (включаючи wavetrend_bounce) [1]
             is_signal = get_backtest_signal(row, prev, ema_fast, ema_slow, 
                                             rsi_min, rsi_max, direction, strategy_type)
             if not is_signal:

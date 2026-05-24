@@ -1,16 +1,24 @@
+# settings.py
 import json
 import os
 
 SETTINGS_FILE = 'settings.json'
 
+# ЄДИНЕ ДЖЕРЕЛО ПРАВДИ: Повний список ТОП-100 альткоїнів з 0% комісій на MEXC
+ALL_PAIRS = [
+    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT',
+    'ADA/USDT', 'DOGE/USDT', 'SHIB/USDT', 'LTC/USDT', 'AVAX/USDT',
+    'DOT/USDT', 'LINK/USDT', 'UNI/USDT', 'ATOM/USDT', 'NEAR/USDT',
+    'TON/USDT', 'SUI/USDT', 'PEPE/USDT', 'WIF/USDT', 'OP/USDT',
+    'JUP/USDT', 'POL/USDT', 'RENDER/USDT', 'GRT/USDT', 'AAVE/USDT',
+    'INJ/USDT', 'ZRO/USDT', 'PYTH/USDT', 'PNUT/USDT', 'ORDI/USDT',
+    'ONDO/USDT', 'ZEC/USDT', 'BCH/USDT', 'ICP/USDT', 'WLD/USDT',
+    'XMR/USDT', 'XLM/USDT'
+]
+
 DEFAULT_SETTINGS = {
     'active_timeframe': 'all',
-    'watchlist': [
-        'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT',
-        'XRP/USDT', 'DOGE/USDT', 'ADA/USDT', 'AVAX/USDT',
-        'DOT/USDT', 'POL/USDT', 'LINK/USDT', 'UNI/USDT',
-        'ATOM/USDT', 'LTC/USDT', 'ETC/USDT', 'FIL/USDT',
-    ],
+    'watchlist': ALL_PAIRS.copy(), # Ініціалізуємо ватчліст за замовчуванням усім списком
     'active_timeframes': ['5m', '15m', '30m', '1h', '4h', '1d'],
     'stop_atr_mult': 2.0,      # множник ATR для стопу
     'tp1_atr_mult': 0.8,       # множник ATR для TP1
@@ -34,9 +42,12 @@ DEFAULT_SETTINGS = {
     'funding_filter_enabled': True,  # Розумний фандинг-фільтр перегріву ринку
     'funding_max_limit': 0.05,       # Максимально дозволена ставка фінансування (%)
     
-    # НОВІ ПАРАМЕТРИ МІНІМАЛЬНОГО ВІДКРИТОГО ІНТЕРЕСУ (OI) [1]
+    # Параметри мінімального відкритого інтересу (OI)
     'oi_filter_enabled': True,       # Розумний фільтр мінімального Open Interest
-    'oi_min_limit': 10.0             # Мінімально дозволений ліміт OI в мільйонах USD ($10.0M)
+    'oi_min_limit': 10.0,            # Мінімально дозволений ліміт OI в мільйонах USD ($10.0M)
+    
+    # Параметр скальперського режиму
+    'scalper_mode_enabled': True     # Чи дозволено скальперські контртрендові угоди
 }
 
 def load_settings():
@@ -63,6 +74,24 @@ def set_setting(key, value):
     settings = load_settings()
     settings[key] = value
     save_settings(settings)
+
+def to_native_float(val):
+    """Кастинг NumPy типів (наприклад, np.float64) до чистих Python float"""
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except Exception:
+        return val
+
+def to_native_int(val):
+    """Кастинг NumPy типів до чистих Python int перед записом у PostgreSQL"""
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except Exception:
+        return val
 
 def get_exchange_client(async_mode=False):
     """Генерує динамічний клієнт підключення для Binance Futures або MEXC Futures"""

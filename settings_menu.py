@@ -1,12 +1,5 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from settings import get_setting, set_setting
-
-ALL_PAIRS = [
-    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT',
-    'XRP/USDT', 'DOGE/USDT', 'ADA/USDT', 'AVAX/USDT',
-    'DOT/USDT', 'POL/USDT', 'LINK/USDT', 'UNI/USDT',
-    'ATOM/USDT', 'LTC/USDT', 'ETC/USDT', 'FIL/USDT',
-]
+from settings import get_setting, set_setting, ALL_PAIRS # Імпортуємо єдиний список [1]
 
 ALL_TIMEFRAMES = ['5m', '15m', '30m', '1h', '4h', '1d']
 
@@ -149,27 +142,32 @@ def filters_keyboard():
         funding_filt = True
     funding_max = get_setting('funding_max_limit') or 0.05
     
-    # Нові параметри OI [1]
     oi_filt = get_setting('oi_filter_enabled')
     if oi_filt is None:
         oi_filt = True
     oi_min = get_setting('oi_min_limit') or 10.0
+    
+    # Новий параметр скальперського режиму [1]
+    scalp_mode = get_setting('scalper_mode_enabled')
+    if scalp_mode is None:
+        scalp_mode = True
 
     text = (
         f"🔍 Фільтри стратегій\n\n"
-        f"⏱ HTF bias фільтр: <b>{'УВІМКНЕНO ✅' if htf else 'ВИМКНЕНО ⬜'}</b>\n"
-        f"🔢 Мін. ймовірність TP1: <b>{min_prob}%</b>\n"
-        f"📐 HTF поріг (EMA різниця): <b>{htf_thresh}%</b>\n"
+        f"⚡️ Скальперський режим (15m-1h): <b>{'УВІМКНЕНO ✅' if scalp_mode else 'ВИМКНЕНО ⬜'}</b>\n"
         f"🪙 Фільтр BTC (BTC Trend): <b>{'УВІМКНЕНO ✅' if btc_filt else 'ВИМКНЕНО ⬜'}</b>\n"
         f"📊 Режим ринку (ADX): <b>{'УВІМКНЕНO ✅' if regime_filt else 'ВИМКНЕНО ⬜'}</b>\n"
         f"💵 Фільтр Фандингу: <b>{'УВІМКНЕНO ✅' if funding_filt else 'ВИМКНЕНО ⬜'}</b>\n"
         f"🌡 Макс. Фандинг ліміт: <b>{funding_max:.3f}%</b>\n"
         f"📈 Фільтр мін. OI: <b>{'УВІМКНЕНO ✅' if oi_filt else 'ВИМКНЕНО ⬜'}</b>\n"
-        f"📉 Мін. OI ліміт: <b>${oi_min:.1f}M</b>\n\n"
+        f"📉 Мін. OI ліміт: <b>${oi_min:.1f}M</b>\n"
+        f"⏱ HTF bias фільтр: <b>{'УВІМКНЕНO ✅' if htf else 'ВИМКНЕНО ⬜'}</b>\n"
+        f"🔢 Мін. ймовірність TP1: <b>{min_prob}%</b>\n"
+        f"📐 HTF поріг (EMA різниця): <b>{htf_thresh}%</b>\n\n"
         f"Використовуй ➖/➕ або кнопки-перемикачі нижче:"
     )
     keyboard = [
-        [InlineKeyboardButton(f"{'✅' if htf else '⬜'} HTF bias фільтр", callback_data="toggle_htf")],
+        [InlineKeyboardButton(f"{'⚡️' if scalp_mode else '⬜'} Скальперський режим (15m-1h)", callback_data="toggle_scalp_mode")],
         [InlineKeyboardButton(f"{'✅' if btc_filt else '⬜'} Фільтр Біткоїна", callback_data="toggle_btc_filter")],
         [InlineKeyboardButton(f"{'✅' if regime_filt else '⬜'} Класифікатор ринку", callback_data="toggle_regime_filter")],
         [InlineKeyboardButton(f"{'✅' if funding_filt else '⬜'} Фільтр Фандингу", callback_data="toggle_funding_filter")],
@@ -184,6 +182,7 @@ def filters_keyboard():
             InlineKeyboardButton(f"${oi_min:.1f}M", callback_data="filter_oi_info"),
             InlineKeyboardButton("OI +", callback_data="filter_oi_up"),
         ],
+        [InlineKeyboardButton(f"{'✅' if htf else '⬜'} HTF bias фільтр", callback_data="toggle_htf")],
         [
             InlineKeyboardButton("Мін. TP1% −", callback_data="filter_prob_down"),
             InlineKeyboardButton(f"TP1 ≥ {min_prob}%", callback_data="filter_prob_info"),
@@ -200,7 +199,7 @@ def filters_keyboard():
 
 
 def get_settings_text():
-    """Текст головного меню налаштувань"""
+    """Текст головного меню налаштувань (додано відображення Скальперського режиму)"""
     watchlist = get_setting('watchlist')
     tfs = get_setting('active_timeframes')
     stop = get_setting('stop_atr_mult')
@@ -232,6 +231,10 @@ def get_settings_text():
     if oi_filt is None:
         oi_filt = True
     oi_min = get_setting('oi_min_limit') or 10.0
+    
+    scalp_mode = get_setting('scalper_mode_enabled')
+    if scalp_mode is None:
+        scalp_mode = True
         
     exchange_name = get_setting('exchange_name') or 'binance'
 
@@ -246,8 +249,9 @@ def get_settings_text():
         f"🔍 HTF фільтр: {'увімк.' if htf else 'вимк.'}\n"
         f"🪙 Фільтр BTC: {'увімк.' if btc_filt else 'вимк.'}\n"
         f"📊 Режим ринку: {'увімк.' if regime_filt else 'вимк.'}\n"
+        f"⚡️ Скальперський режим: <b>{'увімк.' if scalp_mode else 'вимк.'}</b>\n"
         f"💵 Фільтр Фандингу: {'увімк.' if funding_filt else 'вимк.'} (ліміт {funding_max:.3f}%)\n"
         f"📈 Фільтр мін. OI: {'увімк.' if oi_filt else 'вимк.'} (ліміт ${oi_min:.1f}M)\n"
-        f"📊 Макс. сигналів: {max_sig}\n"
+        f"📊 ...\n"
         f"💰 Депозит: ${portfolio_size:.0f} (Ризик {risk_pct:.1f}% | {leverage}x | {'Добір' if use_dobar else 'Без добору'})"
     )
