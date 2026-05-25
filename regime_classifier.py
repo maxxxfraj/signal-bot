@@ -11,7 +11,7 @@ class MarketRegimeClassifier:
     def classify(self, df: pd.DataFrame) -> dict:
         """
         Аналізує мікроструктуру та волатильність.
-        Повертає словник з ідентифікованим режимом ринку та метриками.
+        Повністю оптимізовано для роботи на серверах Render (Linux, Pandas 2.x / NumPy 2.x).
         """
         if len(df) < self.lookback_period:
             return {"regime": "UNKNOWN", "er": 0.5, "z_vol": 0.0}
@@ -25,15 +25,14 @@ class MarketRegimeClassifier:
         change = np.abs(close - np.roll(close, self.er_period))
         diffs = np.abs(close - np.roll(close, 1))
         
-        # Розрахунок ковзної суми шумів за допомогою pandas Series
-        noise = pd.Series(diffs).rolling(window=self.er_period).sum().values
-        noise[noise == 0] = 1e-6 # Захист від ділення на нуль
+        # ДОДАЄМО .copy() ДЛЯ ЗАПОБІГАННЯ ПОМИЛЦІ "assignment destination is read-only"
+        noise = pd.Series(diffs).rolling(window=self.er_period).sum().values.copy()
+        noise[noise == 0] = 1e-6 # Безпечна заміна нулів
         
         er = change / noise
         er_current = er[-1]
         
         # 2. Normalized Volatility Ratio (NVR = ATR / Close)
-        # Швидкий розрахунок True Range (TR)
         tr = np.maximum(
             high - low,
             np.maximum(
