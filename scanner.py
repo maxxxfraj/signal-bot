@@ -7,6 +7,7 @@ import json
 import asyncio
 from backtest import run_backtest
 from settings import get_setting, get_exchange_client, to_native_float, to_native_int
+from regime_classifier import MarketRegimeClassifier
 
 # Ініціалізація динамічного асинхронного клієнта біржі (Binance або MEXC)
 exchange = get_exchange_client(async_mode=True)
@@ -182,12 +183,12 @@ def check_signal_by_type(last, prev, df, symbol, timeframe, direction):
         
         if direction == 'SHORT':
             return (wt1_prev > wt2_prev and 
-                    wt1_last < wt2_last and 
-                    wt1_last > dot_level)
+                    last['wt1'] < last['wt2'] and 
+                    last['wt1'] > dot_level)
         else:
             return (wt1_prev < wt2_prev and 
-                    wt1_last > wt2_last and 
-                    wt1_last < -dot_level)
+                    last['wt1'] > last['wt2'] and 
+                    last['wt1'] < -dot_level)
 
     elif strategy_type == 'breakout':
         high_20 = df['high'].rolling(20).max().iloc[-2]
@@ -396,26 +397,32 @@ async def find_signal(symbol, timeframe, scan_logs=None, btc_df=None):
     is_scalp_tf = timeframe in ['5m', '15m', '30m', '1h']
     mode = 'scalp' if (is_scalp_strategy or is_scalp_tf) else 'swing'
 
+    # --- ІНТЕГРАЦІЯ MARKET REGIME CLASSIFIER ---
     regime_filter = get_setting('regime_filter_enabled')
     if regime_filter is None:
         regime_filter = True
         
     if regime_filter:
         try:
-            adx_series = ta.trend.adx(df['high'], df['low'], df['close'], window=14)
-            latest_adx = adx_series.iloc[-1]
+            classifier = MarketRegimeClassifier()
+            classification = classifier.classify(df)
+            regime = classification["regime"]
             
             trend_strategies = ['ema_rsi', 'macd_cross', 'breakout', 'vol_spike']
             mean_reversion_strategies = ['bb_bounce', 'mean_reversion', 'wavetrend_bounce']
             
-            if strategy_type in trend_strategies and latest_adx < 20:
-                log_skip(f"⛔ {symbol} {timeframe} {direction} — ринок у флеті (ADX={latest_adx:.1f} < 20), трендовий вхід заблоковано", scan_logs)
+            if strategy_type in trend_strategies and regime in ["LOW_VOL_FLAT", "MEAN_REVERSION"]:
+                log_skip(f"⛔ {symbol} {timeframe} {direction} — ринок у ренджі ({regime}), трендовий вхід заблоковано класифікатором", scan_logs)
                 return None
-            elif strategy_type in mean_reversion_strategies and latest_adx > 25:
-                log_skip(f"⛔ {symbol} {timeframe} {direction} — сильний тренд (ADX={latest_adx:.1f} > 25), контртрендовий вхід заблоковано", scan_logs)
+            elif strategy_type in mean_reversion_strategies and regime in ["STABLE_TREND"]:
+                log_skip(f"⛔ {symbol} {timeframe} {direction} — сильний тренд ({regime}), контртрендовий вхід заблоковано класифікатором", scan_logs)
+                return None
+            elif regime == "HIGH_VOL_CHAOS":
+                log_skip(f"⛔ {symbol} {timeframe} {direction} — ринок у фазі аномальної волатильності/хаосу ({regime}), торгівлю зупинено", scan_logs)
                 return None
         except Exception as e:
-            print(f"Помилка розрахунку фільтра ринкового режиму для {symbol}: {e}")
+            print(f"Помилка класифікації ринкового режиму для {symbol}: {e}")
+    # ---------------------------------------------
 
     btc_pass, correlation = await check_btc_and_correlation(symbol, timeframe, df, direction, scan_logs, btc_df)
     if not btc_pass:

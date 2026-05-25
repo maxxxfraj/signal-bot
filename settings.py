@@ -47,7 +47,17 @@ DEFAULT_SETTINGS = {
     'oi_min_limit': 10.0,            # Мінімально дозволений ліміт OI в мільйонах USD ($10.0M)
     
     # Параметр скальперського режиму
-    'scalper_mode_enabled': True     # Чи дозволено скальперські контртрендові угоди
+    'scalper_mode_enabled': True,     # ВИПРАВЛЕНО: Додано кому наприкінці рядка
+    
+    # Параметри для Фази А (Торговий модуль на Testnet)
+    'testnet_enabled': True,         # Чи торгувати на демо-депозиті (Testnet)
+    'trading_enabled': True,          # Чи надсилати реальні ордери на біржу при сигналі
+
+        # Параметри глобальних запобіжників (Portfolio Circuit Breakers)
+    'max_portfolio_margin_pct': 50.0,    # Макс. 50% від депозиту може бути у маржі одночасно
+    'max_daily_loss_pct': 3.0,          # Денний ліміт збитків (3% від депозиту)
+    'consecutive_losses_limit': 3,       # Максимум 3 стопи поспіль, далі cooldown
+    'cooldown_hours': 12,                # Тривалість павзи у торгівлі (12 годин)
 }
 
 def load_settings():

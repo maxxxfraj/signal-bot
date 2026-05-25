@@ -1,5 +1,6 @@
 import pandas as pd
 import ta
+from edge_validator import QuantitativeEdgeValidator
 
 FEE_RATE = 0.0004      # 0.04%
 SLIPPAGE = 0.0005      # 0.05%
@@ -168,36 +169,41 @@ def get_backtest_signal(row, prev, ema_fast, ema_slow, rsi_min, rsi_max, directi
 
 
 def run_backtest(df, direction, ema_fast=20, ema_slow=50, rsi_min=32, rsi_max=60, 
-                 strategy_type='ema_rsi', stop_mult=2.0, tp1_mult=0.8, min_trades=12, min_prob=55):
+                 strategy_type='ema_rsi', stop_mult=2.0, tp1_mult=0.8, min_trades=20, min_prob=55):
     try:
         direction = direction.upper()
         df = df.copy()
 
-        # ОПТИМІЗАЦІЯ: Якщо базові індикатори вже розраховані у scanner.py,
-        # ми просто використовуємо їх і економимо купу процесорного часу!
+        # Розрахунок індикаторів
         if 'rsi' not in df.columns or 'atr' not in df.columns:
             df = calculate_indicators(df, ema_fast, ema_slow)
         else:
-            # Розраховуємо тільки динамічні EMA під параметри конкретної стратегії
             df['ema_fast'] = ta.trend.ema_indicator(df['close'], window=ema_fast)
             df['ema_slow'] = ta.trend.ema_indicator(df['close'], window=ema_slow)
 
         df = df.dropna()
-
-        if len(df) < 100:
+        if len(df) < 300:
             return default_stats()
 
-        trades = []
+        # Ініціалізуємо Edge Validator
+        validator = QuantitativeEdgeValidator(target_oos_ratio=0.30, fee_rate=FEE_RATE, slippage_pct=SLIPPAGE)
+        
+        # Розділяємо дані на In-Sample (оптимізація) та Out-of-Sample (чистий тест)
+        df_in_sample, df_out_of_sample = validator.split_data(df)
 
-        for i in range(50, len(df) - 30):
-            row = df.iloc[i]
-            prev = df.iloc[i - 1]
+        # Проводимо симуляцію угод ТІЛЬКИ на Out-of-Sample вибірці (емуляція майбутнього)
+        trades = []
+        df_oos = df_out_of_sample
+
+        for i in range(50, len(df_oos) - 30):
+            row = df_oos.iloc[i]
+            prev = df_oos.iloc[i - 1]
 
             atr = row['atr']
             if pd.isna(atr) or atr == 0:
                 continue
 
-            # Визначаємо сигнал на основі active стратегії (включаючи wavetrend_bounce) [1]
+            # Логіка сигналу
             is_signal = get_backtest_signal(row, prev, ema_fast, ema_slow, 
                                             rsi_min, rsi_max, direction, strategy_type)
             if not is_signal:
@@ -205,7 +211,6 @@ def run_backtest(df, direction, ema_fast=20, ema_slow=50, rsi_min=32, rsi_max=60
 
             entry = row['close']
 
-            # Розрахунок динамічного ризик-менеджменту
             if direction == 'SHORT':
                 stop_loss = entry + atr * stop_mult
                 tp1 = entry - atr * tp1_mult
@@ -219,8 +224,8 @@ def run_backtest(df, direction, ema_fast=20, ema_slow=50, rsi_min=32, rsi_max=60
                 tp3 = entry + atr * (tp1_mult + 1.2)
                 tp4 = entry + atr * (tp1_mult + 2.2)
 
-            lookahead = 30
-            future = df.iloc[i + 1 : i + 1 + lookahead]
+            # Симуляція утримання позиції на глибину 30 свічок вперед
+            future = df_oos.iloc[i + 1 : i + 1 + 30]
 
             max_deviation = 0.0
             reached_tp1 = False
@@ -235,7 +240,6 @@ def run_backtest(df, direction, ema_fast=20, ema_slow=50, rsi_min=32, rsi_max=60
                 low = frow['low']
 
                 if direction == 'SHORT':
-                    # Пріоритет стоп-лоссу при тестуванні
                     if high >= stop_loss:
                         hit_sl = True
                         gross_loss = (stop_loss - entry) / entry
@@ -292,7 +296,10 @@ def run_backtest(df, direction, ema_fast=20, ema_slow=50, rsi_min=32, rsi_max=60
                 'net_pnl': net_pnl,
             })
 
-        if len(trades) == 0:
+        # Розраховуємо квантову метрику Edge на Out-of-Sample вибірці
+        edge_metrics = validator.evaluate_edge(trades)
+
+        if not edge_metrics["is_valid_edge"]:
             return default_stats()
 
         total = len(trades)
@@ -303,7 +310,7 @@ def run_backtest(df, direction, ema_fast=20, ema_slow=50, rsi_min=32, rsi_max=60
         sl_hits = sum(1 for t in trades if t['hit_sl'])
 
         avg_dev = round(sum(t['max_deviation'] for t in trades) / total, 2)
-        avg_pnl = round(sum(t['net_pnl'] for t in trades) / total, 2)
+        avg_pnl = edge_metrics["expectancy_pct"]
         stop_rate = round(sl_hits / total * 100, 1)
 
         tp1_prob = round(tp1_hits / total * 100)
@@ -311,23 +318,22 @@ def run_backtest(df, direction, ema_fast=20, ema_slow=50, rsi_min=32, rsi_max=60
         tp3_prob = round(tp3_hits / total * 100)
         tp4_prob = round(tp4_hits / total * 100)
 
+        # Повертаємо результати лише у випадку проходження суворого OOS Edge тесту
         return {
             'count': total,
             'avg_dev': avg_dev,
             'avg_pnl': avg_pnl,
             'stop_rate': stop_rate,
             'tp_probs': [tp1_prob, tp2_prob, tp3_prob, tp4_prob],
-            'is_valid': (
-                total >= min_trades and
-                tp1_prob >= min_prob and
-                avg_pnl > 0
-            ),
+            'is_valid': True, # Тільки якщо edge_metrics["is_valid_edge"] == True
+            't_stat': edge_metrics["t_stat"],
+            'profit_factor': edge_metrics["profit_factor"],
+            'sortino_ratio': edge_metrics["sortino_ratio"]
         }
 
     except Exception as e:
         print(f"Помилка бектесту: {e}")
         return default_stats()
-
 
 def default_stats():
     return {
@@ -337,4 +343,7 @@ def default_stats():
         'stop_rate': 0.0,
         'tp_probs': [0, 0, 0, 0],
         'is_valid': False,
+        't_stat': 0.0,
+        'profit_factor': 0.0,
+        'sortino_ratio': 0.0
     }

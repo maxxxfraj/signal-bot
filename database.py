@@ -4,6 +4,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from datetime import datetime, timezone
 from dotenv import load_dotenv
+import numpy as np
 
 # Імпортуємо налаштування та утиліти приведення типів з settings.py на самому початку
 from settings import get_setting, to_native_float, to_native_int
@@ -65,6 +66,10 @@ def init_db():
             mode VARCHAR(10) DEFAULT 'swing',
             funding_rate REAL,
             open_interest REAL,
+            stop_loss_id VARCHAR(50),
+            dobar_order_id VARCHAR(50),
+            tp_order_ids TEXT,
+            dobar_filled_state INTEGER DEFAULT 0,
             created_at TEXT,
             closed_at TEXT
         )
@@ -90,7 +95,26 @@ def init_db():
         )
     ''')
 
-    # Безпечні міграції PostgreSQL
+    # Створюємо таблицю аналітики виконання угод (Slippage & Latency Tracking)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS order_executions (
+            id SERIAL PRIMARY KEY,
+            signal_id INTEGER,
+            symbol VARCHAR(20) NOT NULL,
+            order_type VARCHAR(30) NOT NULL, -- 'entry_market', 'entry_dobar', 'sl', 'tp'
+            side VARCHAR(10) NOT NULL,       -- 'BUY', 'SELL'
+            requested_price REAL,            -- Теоретична ціна сигналу / тейку
+            executed_price REAL,             -- Фактична ціна виконання біржею
+            slippage_pct REAL,               -- % прослизання
+            executed_qty REAL NOT NULL,
+            fee_paid REAL,
+            latency_ms INTEGER,              -- Мережева затримка у мілісекундах
+            executed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (signal_id) REFERENCES stats(id) ON DELETE CASCADE
+        )
+    ''')
+
+    # Безпечні міграції PostgreSQL (Додано нові поля збереження ID ордерів)
     try:
         cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS pos_usd REAL")
         cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS pos_contracts REAL")
@@ -100,6 +124,12 @@ def init_db():
         cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS open_interest REAL")
         cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS mode VARCHAR(10) DEFAULT 'swing'")
         cursor.execute("ALTER TABLE stats ADD COLUMN IF NOT EXISTS mode VARCHAR(10) DEFAULT 'swing'")
+        
+        # НОВІ МІГРАЦІЇ ДЛЯ ФАЗИ Б (Збереження стану ордерів при рестарті)
+        cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS stop_loss_id VARCHAR(50)")
+        cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS dobar_order_id VARCHAR(50)")
+        cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS tp_order_ids TEXT")
+        cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS dobar_filled_state INTEGER DEFAULT 0")
     except Exception as e:
         print(f"Попередження міграції: {e}")
 
@@ -147,6 +177,12 @@ def save_active_signals(signals):
             funding_rate = to_native_float(s.get('funding_rate'))
             open_interest = to_native_float(s.get('open_interest'))
 
+            # Збереження ID ордерів у форматі рядків
+            stop_loss_id = s.get('stop_loss_id')
+            dobar_order_id = s.get('dobar_order_id')
+            tp_order_ids_str = ",".join(s.get('tp_order_ids', [])) if s.get('tp_order_ids') else ""
+            dobar_filled_state = 1 if s.get('dobar_filled_state', False) else 0
+
             if db_id:
                 cursor.execute('''
                     INSERT INTO signals (
@@ -156,8 +192,9 @@ def save_active_signals(signals):
                         tp1_prob, tp2_prob, tp3_prob, tp4_prob,
                         tier, chart_message_id, stat_id,
                         status, show_dobar, hit_tps, pos_usd, pos_contracts,
-                        funding_rate, open_interest, created_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, %s, %s, %s, %s, %s, %s)
+                        funding_rate, open_interest, stop_loss_id, dobar_order_id,
+                        tp_order_ids, dobar_filled_state, created_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (id) DO UPDATE SET
                         symbol = EXCLUDED.symbol,
                         timeframe = EXCLUDED.timeframe,
@@ -184,6 +221,10 @@ def save_active_signals(signals):
                         pos_contracts = EXCLUDED.pos_contracts,
                         funding_rate = EXCLUDED.funding_rate,
                         open_interest = EXCLUDED.open_interest,
+                        stop_loss_id = EXCLUDED.stop_loss_id,
+                        dobar_order_id = EXCLUDED.dobar_order_id,
+                        tp_order_ids = EXCLUDED.tp_order_ids,
+                        dobar_filled_state = EXCLUDED.dobar_filled_state,
                         created_at = EXCLUDED.created_at
                 ''', (
                     db_id,
@@ -200,6 +241,10 @@ def save_active_signals(signals):
                     pos_contracts,
                     funding_rate,
                     open_interest,
+                    stop_loss_id,
+                    dobar_order_id,
+                    tp_order_ids_str,
+                    dobar_filled_state,
                     s.get('created_at', datetime.now(timezone.utc).isoformat()),
                 ))
             else:
@@ -211,8 +256,9 @@ def save_active_signals(signals):
                         tp1_prob, tp2_prob, tp3_prob, tp4_prob,
                         tier, chart_message_id, stat_id,
                         status, show_dobar, hit_tps, pos_usd, pos_contracts,
-                        funding_rate, open_interest, created_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, %s, %s, %s, %s, %s, %s)
+                        funding_rate, open_interest, stop_loss_id, dobar_order_id,
+                        tp_order_ids, dobar_filled_state, created_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                 ''', (
                     s['symbol'], s['timeframe'], s['direction'], entry,
@@ -228,6 +274,10 @@ def save_active_signals(signals):
                     pos_contracts,
                     funding_rate,
                     open_interest,
+                    stop_loss_id,
+                    dobar_order_id,
+                    tp_order_ids_str,
+                    dobar_filled_state,
                     s.get('created_at', datetime.now(timezone.utc).isoformat()),
                 ))
                 s['db_id'] = cursor.fetchone()['id']
@@ -273,6 +323,9 @@ def load_active_signals():
                 except ValueError:
                     pass
 
+            tp_order_ids_str = row.get('tp_order_ids')
+            tp_order_ids = tp_order_ids_str.split(',') if tp_order_ids_str else []
+
             signals.append({
                 'db_id': row['id'],
                 'symbol': row['symbol'],
@@ -292,6 +345,10 @@ def load_active_signals():
                 'pos_contracts': to_native_float(row.get('pos_contracts', 0.0)),
                 'funding_rate': to_native_float(row.get('funding_rate')),
                 'open_interest': to_native_float(row.get('open_interest')),
+                'stop_loss_id': row.get('stop_loss_id'),
+                'dobar_order_id': row.get('dobar_order_id'),
+                'tp_order_ids': tp_order_ids,
+                'dobar_filled_state': bool(row.get('dobar_filled_state', 0)),
                 'created_at': row['created_at'],
                 'stats': {
                     'count': 0, 'avg_dev': 0,
@@ -549,5 +606,201 @@ def clear_stats():
         cursor.close()
     except Exception as e:
         print(f"Помилка очищення статистики: {e}")
+    finally:
+        conn.close()
+        # database.py
+
+def get_daily_pnl_usd():
+    """Повертає чистий реалізований PnL у USD за останні 24 години"""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute('''
+            SELECT SUM(pnl_usd) as daily_pnl 
+            FROM stats 
+            WHERE closed_at IS NOT NULL 
+              AND closed_at::timestamptz >= NOW() - INTERVAL '24 hours'
+        ''')
+        row = cursor.fetchone()
+        cursor.close()
+        return float(row['daily_pnl']) if row and row['daily_pnl'] is not None else 0.0
+    except Exception as e:
+        print(f"Помилка отримання денного PnL з БД: {e}")
+        return 0.0
+    finally:
+        conn.close()
+
+
+def get_consecutive_losses_count(limit=5):
+    """Визначає кількість послідовних стоп-лоссів серед останніх N закритих угод"""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute('''
+            SELECT result 
+            FROM stats 
+            WHERE result IN ('tp', 'be', 'sl') 
+            ORDER BY id DESC 
+            LIMIT %s
+        ''', (limit,))
+        rows = cursor.fetchall()
+        cursor.close()
+        
+        consecutive_losses = 0
+        for row in rows:
+            if row['result'] == 'sl':
+                consecutive_losses += 1
+            else:
+                break
+        return consecutive_losses
+    except Exception as e:
+        print(f"Помилка отримання серії стопів з БД: {e}")
+        return 0
+    finally:
+        conn.close()
+
+
+def get_last_trade_closed_at():
+    """Повертає ISO 8601 дату закриття останньої завершеної угоди"""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute('''
+            SELECT closed_at 
+            FROM stats 
+            WHERE result IN ('tp', 'be', 'sl') 
+            ORDER BY id DESC 
+            LIMIT 1
+        ''')
+        row = cursor.fetchone()
+        cursor.close()
+        return row['closed_at'] if row else None
+    except Exception as e:
+        print(f"Помилка отримання дати останньої угоди: {e}")
+        return None
+    finally:
+        conn.close()
+    
+def log_order_execution(signal_id, symbol, order_type, side, requested_price, executed_price, executed_qty, fee_paid, latency_ms):
+    """
+    Розраховує чисте прослизання в % та записує параметри виконання ордера у PostgreSQL.
+    """
+    # Обчислюємо чисте прослизання (Slippage %) залежно від напрямку угоди
+    if requested_price > 0 and executed_price > 0:
+        if side.upper() == 'BUY' or (side.upper() == 'SELL' and 'tp' in order_type):
+            # Для покупок (або закриття шортів по ТР): гірша ціна — це ціна, що вища за очікувану
+            slippage_pct = ((executed_price - requested_price) / requested_price) * 100.0
+        else:
+            # Для продажів (або закриття лонгів по ТР): гірша ціна — це ціна, що нижча за очікувану
+            slippage_pct = ((requested_price - executed_price) / requested_price) * 100.0
+    else:
+        slippage_pct = 0.0
+
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO order_executions (
+                signal_id, symbol, order_type, side, requested_price, 
+                executed_price, slippage_pct, executed_qty, fee_paid, latency_ms
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ''', (
+            to_native_int(signal_id), symbol, order_type, side, 
+            to_native_float(requested_price), to_native_float(executed_price), 
+            to_native_float(slippage_pct), to_native_float(executed_qty), 
+            to_native_float(fee_paid), to_native_int(latency_ms)
+        ))
+        conn.commit()
+        cursor.close()
+        print(f"📊 [DB EXECUTION] Записано лог для {symbol} ({order_type}). Slippage: {slippage_pct:.4f}%, Latency: {latency_ms}ms")
+    except Exception as e:
+        print(f"Помилка запису аналітики виконання у БД: {e}")
+    finally:
+        conn.close()
+
+def get_execution_analytics_summary():
+    """
+    Асинхронний звіт якості виконання ордерів (Slippage, Latency, Sortino Ratio).
+    Виявляє ТОП-3 найгірших активів за прослизанням.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # 1. Загальна статистика затримки та прослизання
+        cursor.execute('''
+            SELECT 
+                AVG(latency_ms) as avg_lat,
+                AVG(slippage_pct) as avg_slip,
+                SUM(fee_paid) as total_fees,
+                COUNT(*) as total_orders
+            FROM order_executions
+        ''')
+        exec_stats = cursor.fetchone()
+        
+        if not exec_stats or exec_stats['total_orders'] == 0:
+            cursor.close()
+            return "📊 <b>Аналітика виконання (Execution Quality)</b>\n\nДані про реальні виконання ордерів ще відсутні."
+            
+        avg_lat = exec_stats['avg_lat'] or 0.0
+        avg_slip = exec_stats['avg_slip'] or 0.0
+        total_fees = exec_stats['total_fees'] or 0.0
+        total_orders = exec_stats['total_orders']
+        
+        # 2. Метрики ефективності стратегії (Profit Factor, Sortino)
+        cursor.execute("SELECT pnl_usd FROM stats WHERE result IN ('tp', 'be', 'sl')")
+        trades = cursor.fetchall()
+        
+        profit_factor = 0.0
+        sortino_ratio = 0.0
+        if trades:
+            pnl_array = np.array([float(t['pnl_usd'] or 0.0) for t in trades])
+            wins = pnl_array[pnl_array > 0]
+            losses = pnl_array[pnl_array < 0]
+            
+            sum_wins = np.sum(wins) if len(wins) > 0 else 0.0
+            sum_losses = np.abs(np.sum(losses)) if len(losses) > 0 else 1e-6
+            profit_factor = sum_wins / sum_losses
+            
+            downside_std = np.std(losses) if len(losses) > 1 else 1e-6
+            mean_pnl = np.mean(pnl_array)
+            sortino_ratio = (mean_pnl / downside_std) * np.sqrt(252) if downside_std > 0 else 0.0
+            
+        # 3. Аналіз прослизання по парах (ТОП-3 найгірших)
+        cursor.execute('''
+            SELECT symbol, AVG(slippage_pct) as pair_slip, COUNT(*) as pair_count
+            FROM order_executions
+            WHERE order_type = 'entry_market'
+            GROUP BY symbol
+            ORDER BY pair_slip DESC
+            LIMIT 3
+        ''')
+        worst_pairs = cursor.fetchall()
+        
+        lines = [
+            "📊 <b>ЗВІТ ЯКОСТІ ВИКОНАННЯ (EXECUTION QUALITY)</b>",
+            f"",
+            f"⏱ Середня затримка (Latency): <b>{int(avg_lat)} ms</b>",
+            f"📉 Середнє прослизання (Slippage): <b>{avg_slip:.4f}%</b>",
+            f"💸 Сумарна комісія (Maker/Taker): <b>${total_fees:.4f}</b>",
+            f"📦 Оброблено ордерів: <b>{total_orders}</b>",
+            f"",
+            f"📈 Співвідношення прибутку (Profit Factor): <b>{profit_factor:.2f}</b>",
+            f"🛡️ Коефіцієнт Сортіно (Sortino Ratio): <b>{sortino_ratio:.2f}</b>",
+            f""
+        ]
+        
+        if worst_pairs:
+            lines.append("🚩 <b>ТОП-3 пари з найбільшим прослизанням (Slippage):</b>")
+            for i, row in enumerate(worst_pairs):
+                lines.append(f"  {i+1}. #{row['symbol']}: <b>{row['pair_slip']:.4f}%</b> ({row['pair_count']} ордерів)")
+            lines.append("")
+            lines.append("💡 <i>Рекомендація: Розгляньте видалення цих пар з watchlist через високі транзакційні втрати.</i>")
+            
+        cursor.close()
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"Помилка розрахунку аналітики виконання: {e}")
+        return "❌ Помилка розрахунку аналітики"
     finally:
         conn.close()

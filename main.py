@@ -1,3 +1,4 @@
+# main.py
 from settings import get_setting, set_setting, get_exchange_client
 from settings_menu import (
     main_settings_keyboard,
@@ -15,7 +16,7 @@ import asyncio
 import pandas as pd
 import mplfinance as mpf
 import matplotlib.pyplot as plt
-from telegram import Bot
+from telegram import Bot, ReplyKeyboardMarkup, KeyboardButton
 from telegram.request import HTTPXRequest
 from dotenv import load_dotenv
 from scanner import scan_all
@@ -30,17 +31,27 @@ from database import (
     get_fees_for_exchange,
     to_native_float, to_native_int
 )
+from database import get_daily_pnl_usd, get_consecutive_losses_count, get_last_trade_closed_at
+from executor import FuturesExecutor
 import os
 import io
 import sys
 import urllib3
 import time
-from datetime import datetime, timezone  # ДОДАНО ІМПОРТ timezone ДЛЯ UTC
+import html  # Безпечне екранування логів
+from datetime import datetime, timezone
 
+# Вимикає довгі технічні попередження про неперевірений SSL у консолі
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 sys.stdout.reconfigure(line_buffering=True)
 
+# ГЛОБАЛЬНІ ОБ'ЄКТИ ДЛЯ БЕЗПЕКИ ТА ПЕРСИСТЕНТНОСТІ (ФАЗА Б)
 recently_sent = set()
+active_monitors = {}                       # Глобальний реєстр унікальних тасків
+active_signals_lock = asyncio.Lock()        # Мютекс захисту пам'яті від гонок процесів
+global_executor = None                      # Персистентний торговий виконавець
+async_exchange = None                       # Глобальний Singleton-клієнт CCXT
 
 load_dotenv()
 keep_alive()
@@ -56,7 +67,9 @@ request = HTTPXRequest(
     connect_timeout=30,
 )
 
+# Ініціалізація динамічного клієнта біржі для малювання графіків (синхронний)
 exchange = get_exchange_client(async_mode=False)
+
 active_timeframe = get_setting('active_timeframe')
 
 TIMEFRAME_OPTIONS = {
@@ -87,10 +100,10 @@ def main_menu_keyboard():
 
 
 # ─────────────────────────────────────────────
-# CHARTS & FORMATTING
+# CHARTS & FORMATTING (ДИНАМІЧНИЙ РИЗИК ТА ПОСИЛАННЯ)
 # ─────────────────────────────────────────────
 
-is_scanning = False
+is_scanning = False  # Глобальний запобіжник паралельних сканувань
 
 def log_skip_main(msg, scan_logs=None):
     print(msg)
@@ -154,6 +167,19 @@ def _get_price_sync(symbol):
 
 async def get_price(symbol):
     return await asyncio.to_thread(_get_price_sync, symbol)
+
+
+async def get_returns_for_correlation(symbol, timeframe="1h", limit=30):
+    """Швидко завантажує ретерни для розрахунку Pearson correlation"""
+    try:
+        ccxt_futures_symbol = resolve_ccxt_futures_symbol(exchange, symbol)
+        df = await get_candles_main(ccxt_futures_symbol, timeframe, limit=limit)
+        if df is not None and len(df) > 1:
+            return df['close'].pct_change().dropna()
+    except Exception as e:
+        print(f"Помилка завантаження ретернів для кореляції {symbol}: {e}")
+    return None
+
 
 def generate_chart(symbol, timeframe, direction, entry, dobar_low, dobar_high,
                    tps, hit_tps=[], stop_loss=None, show_dobar=True, candles_df=None):
@@ -276,117 +302,509 @@ def generate_chart(symbol, timeframe, direction, entry, dobar_low, dobar_high,
     buf.seek(0)
     return buf
 
-def format_signal(symbol, timeframe, direction, entry, dobar_low, dobar_high,
-                  tps, stats, hit_tps=[], tier='🟢', stop_loss=None, correlation=None,
-                  funding_rate=None, open_interest=None, mode='swing',
-                  pos_usd=None, pos_contracts=None, margin_required=None):
-    dir_emoji = "📈" if direction == "LONG" else "📉"
-    exchange_name = get_setting('exchange_name') or 'binance'
-    leverage = get_setting('leverage') or 20
-    
-    link = get_exchange_link(symbol)
-    
-    lines = []
-    if mode == 'scalp':
-        lines.append(f"⚡️ <a href='{link}'>#{symbol}</a> {timeframe} {tier} (on {exchange_name.upper()} SCALPER)")
-    else:
-        lines.append(f"🟢 <a href='{link}'>#{symbol}</a> {timeframe} {tier} (on {exchange_name.upper()} SWING)")
+# main.py
+
+def format_signal(
+    symbol, timeframe, direction, entry, dobar_low, dobar_high,
+    tps, stats, hit_tps=None, tier='🟢', stop_loss=None, correlation=None,
+    funding_rate=None, open_interest=None, mode='swing',
+    pos_usd=None, pos_contracts=None, margin_required=None
+):
+    """Генерує професійний HTML-шаблон для відправки сигналу в Telegram з підтримкою динамічних сигнатур"""
+    # Якщо hit_tps не передано (новий сигнал), ініціалізуємо його порожнім списком
+    if hit_tps is None:
+        hit_tps = []
         
-    lines.append(f"💎 СТАТУС : {direction} {dir_emoji}")
+    dir_emoji = "📈 LONG" if direction == "LONG" else "📉 SHORT"
     
-    if correlation is not None:
-        lines.append(f"🪙 Кореляція до BTC: <b>{correlation}</b>")
-        
-    if funding_rate is not None or open_interest is not None:
-        oi_str = f"${open_interest / 1000000.0:.2f}M" if open_interest is not None else "N/A"
-        fund_str = f"{funding_rate:.4f}%" if funding_rate is not None else "N/A"
-        lines.append(f"📈 Open Interest: <b>{oi_str}</b> | Funding: <b>{fund_str}</b>")
-        
-    lines.append(f"")
+    lines = [
+        f"🚨 <b>НОВИЙ СИГНАЛ: {tier} #{symbol} ({timeframe})</b>",
+        f"⚖️ Напрямок: <b>{dir_emoji}</b>",
+        f"📊 Режим стратегії: <b>{mode.upper()}</b>",
+        f"",
+        f"💵 Вхід (Entry): <b>{entry}</b>"
+    ]
     
-    if pos_usd is not None and pos_contracts is not None:
-        risk_usd = round(get_setting('portfolio_size') * (get_setting('risk_pct') / 100.0), 2)
-        margin_required = margin_required or round(pos_usd / leverage, 2)
-        is_averaged = get_setting('use_dobar')
-        if is_averaged is None:
-            is_averaged = True
-        dobar_mid = round((dobar_low + dobar_high) / 2.0, 6)
-        avg_entry = round((entry + dobar_mid) / 2.0, 6) if is_averaged else entry
-    else:
-        risk_usd, pos_usd, pos_contracts, margin_required, is_averaged, avg_entry = calculate_position_size_v2(
-            entry, stop_loss, dobar_low, dobar_high
-        )
-    
-    if is_averaged:
-        dobar_mid = round((dobar_low + dobar_high) / 2.0, 6)
-        lines.append(f"👉 ENTRY (Avg): <b>{avg_entry}</b>")
-        lines.append(f"👉 ДОБОР : {dobar_low} — {dobar_high} (Середина: <b>{dobar_mid}</b>)")
-        lines.append(f"ℹ️ <i>(50% на {entry} + 50% на {dobar_mid})</i>")
-    else:
-        lines.append(f"👉 ENTRY : {entry}")
-        lines.append(f"👉 ДОБОР : {dobar_low} — {dobar_high}")
+    if dobar_low is not None and dobar_high is not None:
+        lines.append(f"↩️ Зона добору (Dobar): <b>{dobar_low} - {dobar_high}</b>")
         
     if stop_loss:
-        lines.append(f"🛑 СТОП : {stop_loss}")
+        lines.append(f"🛑 Stop-Loss: <b>{stop_loss}</b>")
         
-        if pos_usd > 0:
-            lines.append(f"")
-            lines.append(f"⚖️ <b>РИЗИК-МЕНЕДЖМЕНТ:</b>")
-            lines.append(f"💵 : {risk_usd} USD")
+    lines.append("")
+    lines.append("🎯 <b>Take-Profit цілі:</b>")
+    
+    tp_labels = ["TP1", "TP2", "TP3", "TP4"]
+    for i, tp in enumerate(tps):
+        tp_price = tp[0]
+        prob = tp[1] if len(tp) > 1 else 50
+        pct = tp[2] if len(tp) > 2 else 0.0
+        
+        is_hit = i in hit_tps
+        checkmark = "✅ " if is_hit else "⬜ "
+        lines.append(f"  {checkmark}{tp_labels[i]}: <b>{tp_price}</b> | Ймовірність: <b>{prob}%</b> | Прибуток: <b>+{pct}%</b>")
+        
+    if pos_usd or pos_contracts or margin_required:
+        lines.append("")
+        lines.append("💼 <b>Ризик-параметри (Sizing):</b>")
+        if pos_usd:
+            try:
+                lines.append(f"  💵 Об'єм позиції: <b>${float(pos_usd):.2f}</b>")
+            except ValueError:
+                lines.append(f"  💵 Об'єм позиції: <b>${pos_usd}</b>")
+        if pos_contracts:
+            try:
+                lines.append(f"  📦 Контракти: <b>{float(pos_contracts):.4f} {symbol[:-4]}</b>")
+            except ValueError:
+                lines.append(f"  📦 Контракти: <b>{pos_contracts} {symbol[:-4]}</b>")
+        if margin_required:
+            try:
+                lines.append(f"  ⚡ Необхідна маржа: <b>${float(margin_required):.2f}</b>")
+            except ValueError:
+                lines.append(f"  ⚡ Необхідна маржа: <b>${margin_required}</b>")
             
-            if is_averaged:
-                dobar_mid = round((dobar_low + dobar_high) / 2.0, 6)
-                lines.append(f"💼 Реком. Об'єм: <b>${pos_usd}</b> (або {pos_contracts:.1f} {symbol[:-4]})")
-                lines.append(f"💵 <i>-> ${pos_usd/2:.2f} на {entry} + ${pos_usd/2:.2f} на {dobar_mid}</i>")
-            else:
-                lines.append(f"💼 Реком. Об'єм: <b>${pos_usd}</b> (або {pos_contracts:.1f} {symbol[:-4]})")
-                
-            lines.append(f"⚡ Необхідна маржа: <b>${margin_required}</b> (при плечі {leverage}x)")
+    if correlation is not None or funding_rate is not None or open_interest is not None:
+        lines.append("")
+        lines.append("🌡 <b>Деривативні метрики ринку:</b>")
+        if correlation is not None:
+            try:
+                lines.append(f"  🪙 Кореляція з BTC: <b>{float(correlation):.2f}</b>")
+            except ValueError:
+                lines.append(f"  🪙 Кореляція з BTC: <b>{correlation}</b>")
+        if funding_rate is not None:
+            try:
+                lines.append(f"  💵 Ставка фінансування (Funding): <b>{float(funding_rate):.4f}%</b>")
+            except ValueError:
+                lines.append(f"  💵 Ставка фінансування (Funding): <b>{funding_rate}%</b>")
+        if open_interest is not None:
+            try:
+                lines.append(f"  📈 Відкритий інтерес (OI): <b>${float(open_interest)/1_000_000:.2f}M</b>")
+            except ValueError:
+                lines.append(f"  📈 Відкритий інтерес (OI): <b>${open_interest}</b>")
             
-    lines.append(f"")
-
-    tp_labels_list = ['TP1', 'TP2', 'TP3', 'TP4']
-    for i, (tp_price, prob, pct) in enumerate(tps):
-        check = "✅ " if i in hit_tps else ""
-        if prob >= 70:
-            fire = "🔥"
-        elif prob >= 40:
-            fire = "⚡"
-        elif prob >= 20:
-            fire = "🌡"
-        else:
-            fire = "❄️"
-        lines.append(f"🎯 {check}{tp_labels_list[i]} : {tp_price} ({fire}{prob}%) | (💰{pct}%)")
-
-    lines.append(f"")
-    if stats['count'] > 0:
-        lines.append(f"📊 {stats['count']} сигналів")
-        lines.append(f"📉 Середнє відхилення: {stats['avg_dev']}%")
-        deviations = stats.get('deviations', {})
-        for dev, cnt in deviations.items():
-            lines.append(f"📉 Відхилення ≥ {dev}%: {cnt}")
-
+    exchange_name = get_setting('exchange_name') or 'binance'
+    symbol_clean = symbol.replace('/', '').upper()
+    if exchange_name == 'mexc':
+        base = symbol_clean[:-4]
+        link = f"https://futures.mexc.com/exchange/{base}_USDT"
+    else:
+        link = f"https://www.binance.com/en/futures/{symbol_clean}"
+        
+    lines.append("")
+    lines.append(f"🔗 <a href='{link}'>Торгувати на {exchange_name.upper()}</a>")
+    
     return "\n".join(lines)
 
 
-def get_timeframe_keyboard(current):
-    options = ['all', '5m', '15m', '30m', '1h', '4h', '1d']
-    labels = {
-        'all': '🌐 Всі', '5m': '5m', '15m': '15m',
-        '30m': '30m', '1h': '1h', '4h': '4h', '1d': '1d'
-    }
-    keyboard = []
-    row = []
-    for opt in options:
-        mark = '✅ ' if opt == current else ''
-        row.append({'text': f'{mark}{labels[opt]}', 'callback_data': f'tf_{opt}'})
-        if len(row) == 3:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-    keyboard.append([{'text': '🔙 Назад', 'callback_data': 'back'}])
-    return keyboard
+# ─────────────────────────────────────────────
+# ВСПОМІЖНИЙ МЕТОД ДЛЯ АВТОРИЗОВАНИХ КЛІЄНТІВ
+# ─────────────────────────────────────────────
+
+# Глобальний Singleton-об'єкт підключення
+async_exchange = None
+
+async def get_auth_exchange_client():
+    """Повертає єдиний глобальний асинхронний клієнт CCXT (Singleton-патерн)"""
+    global async_exchange
+    if async_exchange is not None:
+        return async_exchange
+        
+    import ccxt.async_support as ccxt_async
+    
+    exchange_name = get_setting('exchange_name') or 'binance'
+    testnet_mode = get_setting('testnet_enabled')
+    
+    if testnet_mode:
+        api_key = os.getenv("TESTNET_API_KEY")
+        secret = os.getenv("TESTNET_API_SECRET")
+    else:
+        api_key = os.getenv("PROD_API_KEY")
+        secret = os.getenv("PROD_API_SECRET")
+        
+    if not api_key or not secret:
+        raise ValueError("Критична помилка: в системних змінних Render/.env не знайдено API-ключів!")
+        
+    if exchange_name == 'binance':
+        client = ccxt_async.binanceusdm({
+            'apiKey': api_key,
+            'secret': secret,
+            'enableRateLimit': True,
+            'aiohttp_trust_env': False
+        })
+        client.options['warnOnFetchOpenOrdersWithoutSymbol'] = False
+        if testnet_mode:
+            client.enable_demo_trading(True)
+    else:
+        client = ccxt_async.mexc({
+            'apiKey': api_key,
+            'secret': secret,
+            'enableRateLimit': True,
+            'options': {'defaultType': 'swap'},
+            'aiohttp_trust_env': False
+        })
+        if testnet_mode:
+            client.set_sandbox_mode(True)
+            
+    try:
+        await client.load_markets()
+    except Exception as e:
+        await client.close()
+        raise e
+        
+    async_exchange = client
+    return async_exchange
+
+
+# ─────────────────────────────────────────────
+# УНІФІКОВАНИЙ ХЕЛПЕР РЕЗОЛВУ СИМВОЛУ Ф'ЮЧЕРСІВ CCXT
+# ─────────────────────────────────────────────
+
+def resolve_ccxt_futures_symbol(exchange_client, db_symbol):
+    """
+    Уніфікований розбір символу під конкретну версію CCXT (з урахуванням чи без суфіксу :USDT)
+    Усуває помилку BadSymbol для ICPUSDT та інших альткоїнів.
+    """
+    if not db_symbol.endswith('USDT'):
+        return db_symbol
+        
+    base = db_symbol[:-4]
+    
+    sym_tz = f"{base}/USDT:USDT"
+    if sym_tz in exchange_client.markets:
+        return sym_tz
+        
+    # ВИПРАВЛЕНО БАГ №2: Спот-фолбек виключено для запобігання торгівлі на спотовому ринку!
+    sym_spot = f"{base}/USDT"
+    if sym_spot in exchange_client.markets:
+        market_info = exchange_client.markets[sym_spot]
+        if market_info.get('type') in ['swap', 'future', 'linear']:
+            return sym_spot
+        
+    return sym_tz
+
+
+# ─────────────────────────────────────────────
+# УНІФІКОВАНИЙ ХЕЛПЕР ОТРИМАННЯ ОБ'ЄМУ ПОЗИЦІЇ
+# ─────────────────────────────────────────────
+
+async def get_active_position_qty(async_ex, symbol_clean, ccxt_symbol):
+    """
+    Каскадний асинхронний метод визначення об'єму позиції на біржі.
+    Сумісний з будь-якими версіями CCXT для Binance та MEXC.
+    """
+    try:
+        positions = await async_ex.fetch_positions([ccxt_symbol])
+        for pos in positions:
+            pos_sym = pos.get('symbol', '').replace('/', '').split(':')[0]
+            if pos_sym == symbol_clean:
+                return abs(float(pos.get('contracts', 0.0)))
+    except Exception:
+        pass
+        
+    try:
+        balance = await async_ex.fetch_balance()
+        
+        # 2.1 Format Binance
+        raw_positions = balance.get('info', {}).get('positions', [])
+        for pos in raw_positions:
+            if pos.get('symbol') == symbol_clean:
+                return abs(float(pos.get('positionAmt', 0.0)))
+                
+        # 2.2 Format MEXC
+        raw_mexc = balance.get('info', {}).get('data', [])
+        if isinstance(raw_mexc, list):
+            for pos in raw_mexc:
+                if pos.get('symbol') == symbol_clean:
+                    return abs(float(pos.get('positionAmt', 0.0)))
+                    
+        # 2.3 Стандартний узагальнений масив CCXT
+        unified_positions = balance.get('positions', [])
+        for pos in unified_positions:
+            pos_sym = pos.get('symbol', '').replace('/', '').split(':')[0]
+            if pos_sym == symbol_clean:
+                return abs(float(pos.get('contracts', 0.0)))
+                
+    except Exception as e:
+        print(f"Помилка розрахунку об'єму позиції для {symbol_clean}: {e}")
+    return 0.0
+
+
+# ─────────────────────────────────────────────
+# УНІВЕРСАЛЬНИЙ ХЕЛПЕР ПОВНОГО ОЧИЩЕННЯ СІТКИ (БЕЗПЕЧНО ДЛЯ Ф'ЮЧЕРСІВ)
+# ─────────────────────────────────────────────
+
+
+# main.py
+
+# main.py
+
+async def cancel_all_exchange_orders_for_symbol(async_ex, symbol_clean, ccxt_symbol):
+    """
+    Універсальний, 100% завадостійкий метод очищення абсолютно всіх ордерів по монеті.
+    Скасовує базові лімітки та алгоритмічні умовні ордери (Stop-Loss/Take-Profit).
+    Оптимізовано під специфіку шлюзів Binance та MEXC.
+    """
+    print(f"🧹 Запуск повного очищення ліміток та тригерних ордерів для {symbol_clean} ({ccxt_symbol})...")
+    try:
+        if 'binance' in async_ex.id.lower():
+            market = async_ex.market(ccxt_symbol)
+            
+            # 1. Скасовуємо стандартні лімітні ордери (Dobar, Limit TPs)
+            try:
+                await async_ex.fapiPrivateDeleteAllOpenOrders({'symbol': market['id']})
+                print(f"✅ Успішно скасовано базові лімітні ордери на Binance для {symbol_clean}")
+            except Exception as e:
+                print(f"⚠️ Попередження під час видалення базових ордерів на Binance: {e}")
+                
+            # 2. Скасовуємо алгоритмічні умовні ордери (STOP_MARKET Stop-Loss, Algo TPs)
+            try:
+                await async_ex.fapiPrivateDeleteAlgoOpenOrders({'symbol': market['id']})
+                print(f"✅ Успішно скасовано умовні Algo-ордери (Stop-Loss) на Binance для {symbol_clean}")
+            except Exception as e:
+                print(f"⚠️ Попередження під час видалення умовних Algo-ордерів на Binance: {e}")
+                
+            print(f"🧹 Повне очищення Binance для {symbol_clean} завершено.")
+            
+        elif 'mexc' in async_ex.id.lower():
+            try:
+                await async_ex.cancel_all_orders(ccxt_symbol)
+            except Exception:
+                pass
+            # Поштучно зачищаємо умовні стопи MEXC, якщо вони залишились
+            open_orders = await async_ex.fetch_open_orders(ccxt_symbol)
+            for order in open_orders:
+                try:
+                    await async_ex.cancel_order(order['id'], ccxt_symbol)
+                except Exception:
+                    pass
+        else:
+            # Загальний фолбек для інших підключень
+            await async_ex.cancel_all_orders(ccxt_symbol)
+    except Exception as e:
+        print(f"⚠️ Попередження під час групового скасування ордерів для {symbol_clean}: {e}")
+        # Фолбек-зачистка поштучно в разі виникнення помилок
+        try:
+            open_orders = await async_ex.fetch_open_orders(ccxt_symbol)
+            for order in open_orders:
+                try:
+                    await async_ex.cancel_order(order['id'], ccxt_symbol)
+                except Exception:
+                    pass
+        except Exception as fe:
+            print(f"❌ Критична помилка фолбек-зачистки для {symbol_clean}: {fe}")
+
+# ─────────────────────────────────────────────
+# ФАЗА Б: СТАНЦІЯ ПРИМИРЕННЯ ТА ЛІКУВАННЯ ПОЗИЦІЙ ПРИ СТАРТІ (УЛЬТИМАТИВНИЙ GRID RESET З ЗАТРИМКОЮ)
+# ─────────────────────────────────────────────
+
+async def reconcile_active_signals_state(bot, active_signals):
+    """
+    Сканує всі активні сигнали при старті програми, звіряє їхній стан з біржею, 
+    повністю зачищає старі дублікати (як стандартні, так і умовні Algo-ордери)
+    та перевиставляє ідеальну чисту сітку (Stop-Loss, Dobar, Take-Profits) з авто-лікуванням.
+    """
+    print("🔍 Запуск примирення (Reconciliation) та лікування позицій при старті...")
+    
+    for signal in list(active_signals):
+        symbol = signal['symbol']
+        timeframe = signal['timeframe']
+        
+        async_ex = None
+        try:
+            async_ex = await get_auth_exchange_client()
+            ccxt_futures_symbol = resolve_ccxt_futures_symbol(async_ex, symbol)
+            
+            # 1. Отримуємо фактичний об'єм позиції на біржі
+            active_qty = await get_active_position_qty(async_ex, symbol, ccxt_futures_symbol)
+            
+            # --- ВАРІАНТ 1: ПОЗИЦІЮ ЗАКРИТО ОФЛАЙН (Об'єм на біржі = 0) ---
+            if active_qty == 0:
+                print(f"🧹 Позицію по {symbol} було закрито на біржі офлайн. Очищення залишкових ордерів...")
+                await cancel_all_exchange_orders_for_symbol(async_ex, symbol.replace('/', ''), ccxt_futures_symbol)
+                
+                async with active_signals_lock:
+                    remove_active_signal(symbol, timeframe)
+                    if signal in active_signals:
+                        active_signals.remove(signal)
+                    active_monitors.pop((symbol, timeframe), None)
+                    
+                await bot.send_message(
+                    chat_id=CHAT_ID,
+                    text=f"🏁 <b>Позицію по #{symbol} ({timeframe}) було закрито на біржі офлайн.</b>\n"
+                         f"🧹 Всі залишені ордери успішно асинхронно очищені при старті бота.",
+                    parse_mode='HTML'
+                )
+                continue
+                
+            # --- ВАРІАНТ 2: ПОВНИЙ GRID RESET ПРИ СТАРТІ ---
+            print(f"🔄 Лікування при старті: Повна перебудова сітки для {symbol} ({timeframe})...")
+            
+            # 1. Повністю скасовуємо всі ордери по монеті на біржі ( Стандарті та Алгоритмічні )
+            await cancel_all_exchange_orders_for_symbol(async_ex, symbol.replace('/', ''), ccxt_futures_symbol)
+            await asyncio.sleep(1.5)
+            
+            direction = signal['direction']
+            entry_side = "buy" if direction == "LONG" else "sell"
+            exit_side = "sell" if direction == "LONG" else "buy"
+            
+            # --- ВІДНОВЛЕННЯ 1: STOP-LOSS (STOP_MARKET) З АВТО-ЛІКУВАННЯМ БУ ---
+            hit_tps = set(signal.get('hit_tps', []))
+            use_dobar_setting = get_setting('use_dobar')
+            if use_dobar_setting is None:
+                use_dobar_setting = True
+                
+            if 0 in hit_tps:
+                # Якщо TP1 вже зафіксовано в базі, примусово та динамічно виправляємо ціну БУ на правильну
+                dobar_filled_state = bool(signal.get('dobar_filled_state', False))
+                if use_dobar_setting and dobar_filled_state:
+                    dobar_mid = (signal['dobar_low'] + signal['dobar_high']) / 2.0
+                    correct_sl = (signal['entry'] + dobar_mid) / 2.0
+                else:
+                    correct_sl = signal['entry']
+                
+                sl_price = correct_sl
+                signal['stop_loss'] = correct_sl
+                print(f"🩹 [HEALING] Виправлено пошкоджений БУ-стоп для {symbol} на правильний рівень: {correct_sl}")
+            else:
+                sl_price = signal.get('stop_loss')
+                
+            new_sl_id = None
+            if sl_price:
+                sl_price_str = async_ex.price_to_precision(ccxt_futures_symbol, sl_price)
+                sl_params = {
+                    'stopPrice': float(sl_price_str),
+                    'reduceOnly': True
+                }
+                new_sl_order = await async_ex.create_order(
+                    symbol=ccxt_futures_symbol,
+                    type='STOP_MARKET',
+                    side=exit_side,
+                    amount=active_qty,
+                    params=sl_params
+                )
+                new_sl_id = new_sl_order["id"]
+                
+            # --- ВІДНОВЛЕННЯ 2: DOBAR ---
+            dobar_filled_state = bool(signal.get('dobar_filled_state', False))
+            total_expected = float(async_ex.amount_to_precision(ccxt_futures_symbol, signal.get('pos_contracts', 0.0)))
+            
+            # Якщо БУ ще не був активований у базі, але на біржі об'єм вирівнявся до 100% (добор виконано офлайн)
+            if not dobar_filled_state and active_qty >= total_expected * 0.95:
+                signal['dobar_filled_state'] = True
+                dobar_filled_state = True
+                print(f"↩️ Виявлено виконання добору (Dobar) для {symbol} офлайн при старті.")
+
+            new_dobar_id = signal.get('dobar_order_id')
+            if use_dobar_setting and not dobar_filled_state and (0 not in hit_tps):
+                dobar_low = signal.get('dobar_low')
+                dobar_high = signal.get('dobar_high')
+                if dobar_low is not None and dobar_high is not None:
+                    dobar_mid = (dobar_low + dobar_high) / 2.0
+                    dobar_price_str = async_ex.price_to_precision(ccxt_futures_symbol, dobar_mid)
+                    print(f"⏳ Відновлення Dobar лімітки на {active_qty} за ціною {dobar_price_str}")
+                    dobar_order = await async_ex.create_order(
+                        symbol=ccxt_futures_symbol,
+                        type='limit',
+                        side=entry_side,
+                        amount=active_qty,
+                        price=float(dobar_price_str)
+                    )
+                    new_dobar_id = dobar_order["id"]
+            else:
+                new_dobar_id = None
+                    
+            # --- ВІДНОВЛЕННЯ 3: TAKE-PROFIT (З ЗАХИСТОМ ВІД ПОМИЛКИ -4164) ---
+            new_tp_ids = []
+            tps = signal.get('tps', [])
+            
+            remaining_tps_count = 4 - len(hit_tps)
+            if remaining_tps_count > 0:
+                # Отримуємо найближчу невідкриту ціль тейку
+                next_tp_price = tps[3][0]
+                for idx, (tp_price, _, _) in enumerate(tps[:4]):
+                    if idx not in hit_tps:
+                        next_tp_price = tp_price
+                        break
+                        
+                # Оцінюємо номінал одного кроку
+                estimated_step_notional = (active_qty / remaining_tps_count) * next_tp_price
+                
+                # Запобігання помилці -4164 (Якщо менше ніж 5.1 USDT, об'єднуємо залишок в один ордер)
+                if estimated_step_notional < 5.1:
+                    print(f"⚠️ [NOTIONAL GUARD] Номінал кроку ({estimated_step_notional:.2f} USD) менший за ліміт Binance $5. Об'єднуємо тейки в один.")
+                    tp_price_str = async_ex.price_to_precision(ccxt_futures_symbol, next_tp_price)
+                    tp_order = await async_ex.create_order(
+                        symbol=ccxt_futures_symbol,
+                        type='limit',
+                        side=exit_side,
+                        amount=active_qty,
+                        price=float(tp_price_str),
+                        params={'reduceOnly': True}
+                    )
+                    new_tp_ids.append(tp_order['id'])
+                else:
+                    # Стандартна розділена сітка
+                    tp_step_volume = float(async_ex.amount_to_precision(ccxt_futures_symbol, active_qty / remaining_tps_count))
+                    tp_counter = 0
+                    for idx, (tp_price, _, _) in enumerate(tps[:4]):
+                        if idx in hit_tps:
+                            continue
+                            
+                        current_tp_vol = tp_step_volume
+                        if tp_counter == remaining_tps_count - 1:
+                            current_tp_vol = float(async_ex.amount_to_precision(
+                                ccxt_futures_symbol, active_qty - (tp_step_volume * (remaining_tps_count - 1))
+                            ))
+                        if current_tp_vol <= 0:
+                            continue
+                            
+                        tp_price_str = async_ex.price_to_precision(ccxt_futures_symbol, tp_price)
+                        print(f"🎯 Відновлення TP{idx+1} на {current_tp_vol} за ціною {tp_price_str}")
+                        tp_order = await async_ex.create_order(
+                            symbol=ccxt_futures_symbol,
+                            type='limit',
+                            side=exit_side,
+                            amount=current_tp_vol,
+                            price=float(tp_price_str),
+                            params={'reduceOnly': True}
+                        )
+                        new_tp_ids.append(tp_order["id"])
+                        tp_counter += 1
+                
+            # Оновлюємо стан ордерів у базі
+            def update_startup_db_orders(db_id, actual_vol, sl_id, dobar_id, tp_ids, stop_loss_price):
+                from database import get_connection
+                conn = get_connection()
+                try:
+                    cursor = conn.cursor()
+                    tp_ids_str = ",".join(tp_ids) if tp_ids else ""
+                    dobar_filled_val = 1 if dobar_filled_state else 0
+                    cursor.execute(
+                        "UPDATE signals SET pos_contracts = %s, stop_loss_id = %s, dobar_order_id = %s, tp_order_ids = %s, dobar_filled_state = %s, stop_loss = %s WHERE id = %s",
+                        (actual_vol if dobar_filled_state else actual_vol * 2.0, sl_id, dobar_id, tp_ids_str, dobar_filled_val, stop_loss_price, db_id)
+                    )
+                    conn.commit()
+                    cursor.close()
+                except Exception as ex:
+                    print(f"Помилка оновлення стартових ордерів у БД: {ex}")
+                finally:
+                    conn.close()
+                    
+            if signal.get('db_id'):
+                update_startup_db_orders(signal['db_id'], active_qty, new_sl_id, new_dobar_id, new_tp_ids, sl_price)
+                
+            signal['pos_contracts'] = active_qty if dobar_filled_state else active_qty * 2.0
+            signal['stop_loss_id'] = new_sl_id
+            signal['dobar_order_id'] = new_dobar_id
+            signal['tp_order_ids'] = new_tp_ids
+                
+        except Exception as rec_err:
+            print(f"Помилка примирення при старті для {symbol}: {rec_err}")
+        finally:
+            pass
+                
+    save_active_signals(active_signals)
+    print("✅ Фонове примирення при старті завершено успішно!")
 
 
 # ─────────────────────────────────────────────
@@ -394,6 +812,7 @@ def get_timeframe_keyboard(current):
 # ─────────────────────────────────────────────
 
 async def reconcile_historical_gap(bot, signal, active_signals):
+    """Синхронізує та відновлює упущені цілі/стопи з урахуванням локального часового поясу комп'ютера"""
     symbol = signal['symbol']
     timeframe = signal['timeframe']
     direction = signal['direction']
@@ -405,21 +824,19 @@ async def reconcile_historical_gap(bot, signal, active_signals):
         return True
         
     try:
-        # ВИПРАВЛЕНО ВРАЗЛИВІСТЬ ДО ЧАСОВИХ ПОЯСІВ:
-        # Конвертуємо ISO рядок у UTC-datetime і видаляємо tz-інформацію для точного порівняння з df.index
         created_at = pd.to_datetime(created_at_str)
         if created_at.tz is not None:
             created_at_utc = created_at.tz_convert('UTC').tz_localize(None)
         else:
             created_at_utc = created_at
     except Exception as e:
-        print(f"Помилка парсингу дати для {symbol}: {e}")
+        print(f"Помилка розбору дати упущення для {symbol}: {e}")
         created_at_utc = pd.to_datetime(created_at_str)
         
-    ccxt_symbol = symbol[:-4] + '/USDT' if symbol.endswith('USDT') else symbol
+    ccxt_futures_symbol = resolve_ccxt_futures_symbol(exchange, symbol)
     
     try:
-        df = await get_candles_main(ccxt_symbol, timeframe, limit=1000)
+        df = await get_candles_main(ccxt_futures_symbol, timeframe, limit=1000)
         if df is None or len(df) == 0:
             return True
             
@@ -427,7 +844,7 @@ async def reconcile_historical_gap(bot, signal, active_signals):
         if len(gap_candles) == 0:
             return True
             
-        print(f"⏳ Синхронізація історії {symbol} {timeframe} за {len(gap_candles)} свічок...")
+        print(f"⏳ ССинхронізація історії {symbol} {timeframe} за {len(gap_candles)} свічок...")
         
         hit_tps = set(signal.get('hit_tps', []))
         breakeven = 0 in hit_tps
@@ -492,9 +909,11 @@ async def reconcile_historical_gap(bot, signal, active_signals):
                     except Exception as ex:
                         print(f"Помилка відправки іст. закриття {symbol}: {ex}")
                         
-                    remove_active_signal(symbol, timeframe)
-                    if signal in active_signals:
-                        active_signals.remove(signal)
+                    async with active_signals_lock:
+                        remove_active_signal(symbol, timeframe)
+                        if signal in active_signals:
+                            active_signals.remove(signal)
+                        active_monitors.pop((symbol, timeframe), None)
                     return False
                     
             new_hits = set()
@@ -595,7 +1014,88 @@ async def monitor_signal(bot, signal, active_signals):
 
         stop_loss = signal.get('stop_loss')
         entry = signal['entry']
+        exit_side = "sell" if direction == "LONG" else "buy"
 
+        # --- ДИНАМІЧНИЙ ДЕТЕКТОР ДОБОРУ (DOBAR-SENSING) ---
+        dobar_filled_state = signal.get('dobar_filled_state', False)
+        use_dobar_setting = get_setting('use_dobar')
+        if use_dobar_setting is None:
+            use_dobar_setting = True
+
+        if not dobar_filled_state and get_setting('trading_enabled') and use_dobar_setting:
+            async_ex = None
+            try:
+                # Використовуємо наш новий асинхронний клієнт
+                async_ex = await get_auth_exchange_client()
+                ccxt_futures_symbol = resolve_ccxt_futures_symbol(async_ex, symbol)
+                
+                # Перевіряємо фактичний об'єм позиції на біржі за допомогою надійного корутина get_active_position_qty
+                active_qty = await get_active_position_qty(async_ex, symbol, ccxt_futures_symbol)
+                
+                total_expected = float(async_ex.amount_to_precision(ccxt_futures_symbol, signal.get('pos_contracts', 0.0)))
+                
+                # Якщо об'єм вирівнявся до 100% очікуваного об'єму (усереднення виконано)
+                if active_qty >= total_expected * 0.95:
+                    print(f"↩️ Виявлено виконання лімітки добору (Dobar) для {symbol}!")
+                    
+                    # 1. Скасовуємо старі 50%-ві Take-Profit лімітки
+                    old_tp_ids = signal.get('tp_order_ids', [])
+                    for tp_id in old_tp_ids:
+                        try:
+                            await async_ex.cancel_order(tp_id, ccxt_futures_symbol)
+                        except Exception:
+                            pass
+                    
+                    # 2. Виставляємо нові лімітні тейки на ПОВНИЙ об'єм (100%) з reduceOnly
+                    new_tp_ids = []
+                    tp_step_volume = float(async_ex.amount_to_precision(ccxt_futures_symbol, total_expected / 4))
+                    
+                    for idx, (tp_price, _, _) in enumerate(tps[:4]):
+                        current_tp_vol = tp_step_volume
+                        if idx == 3:
+                            current_tp_vol = float(async_ex.amount_to_precision(
+                                ccxt_futures_symbol, total_expected - (tp_step_volume * 3)
+                            ))
+                        
+                        if current_tp_vol <= 0:
+                            continue
+                            
+                        tp_price_str = async_ex.price_to_precision(ccxt_futures_symbol, tp_price)
+                        print(f"🎯 Оновлення: виставлення повного TP{idx+1} на {current_tp_vol} за ціною {tp_price_str}")
+                        tp_order = await async_ex.create_order(
+                            symbol=ccxt_futures_symbol,
+                            type='limit',
+                            side=exit_side,
+                            amount=current_tp_vol,
+                            price=float(tp_price_str),
+                            params={'reduceOnly': True}
+                        )
+                        new_tp_ids.append(tp_order["id"])
+                    
+                    # 3. Оновлюємо стан сигналу
+                    signal['dobar_filled_state'] = True
+                    signal['tp_order_ids'] = new_tp_ids
+                    save_active_signals(active_signals)
+                    
+                    # 4. Повідомляємо в Telegram відповіддю під графіком
+                    await bot.send_message(
+                        chat_id=CHAT_ID,
+                        text=(
+                            f"↩️ <b>Добір (Dobar) виконано на біржі!</b>\n"
+                            f"📦 Позицію збільшено до повного об'єму: <b>{total_expected} {symbol[:-4]}</b>\n"
+                            f"🎯 Лімітні Take-Profit ордери автоматично оновлено на повний об'єм (комісія Maker)."
+                        ),
+                        parse_mode='HTML',
+                        reply_to_message_id=chart_message_id
+                    )
+                
+            except Exception as dobar_err:
+                print(f"Помилка відстеження добору для {symbol}: {dobar_err}")
+            finally:
+                            pass  # Гарантоване закриття ресурсу
+        # --------------------------------------------------
+
+        # --- КРОК 1: Перевірка Stop Loss ---
         if stop_loss:
             sl_hit = (direction == 'SHORT' and price >= stop_loss) or \
                      (direction == 'LONG' and price <= stop_loss)
@@ -624,9 +1124,6 @@ async def monitor_signal(bot, signal, active_signals):
                     entry_fee = entry * pos_contracts * taker
                     exit_fee = price * pos_contracts * taker
                     
-                    use_dobar_setting = get_setting('use_dobar')
-                    if use_dobar_setting is None:
-                        use_dobar_setting = True
                     avg_entry = entry
                     if use_dobar_setting and signal.get('dobar_low') is not None and signal.get('dobar_high') is not None:
                         dobar_mid = (signal['dobar_low'] + signal['dobar_high']) / 2.0
@@ -659,9 +1156,6 @@ async def monitor_signal(bot, signal, active_signals):
                     pos_contracts = signal.get('pos_contracts', 0.0)
                     maker, taker = get_fees_for_exchange()
                     
-                    use_dobar_setting = get_setting('use_dobar')
-                    if use_dobar_setting is None:
-                        use_dobar_setting = True
                     avg_entry = entry
                     if use_dobar_setting and signal.get('dobar_low') is not None and signal.get('dobar_high') is not None:
                         dobar_mid = (signal['dobar_low'] + signal['dobar_high']) / 2.0
@@ -690,11 +1184,30 @@ async def monitor_signal(bot, signal, active_signals):
                     
                     close_signal_stat(signal.get('stat_id'), 'sl', -sl_pct, price)
 
-                remove_active_signal(symbol, signal['timeframe'])
-                if signal in active_signals:
-                    active_signals.remove(signal)
+                # ОЧИЩЕННЯ ЛІМІТОК ПРИ СТОПІ (ВИПРАВЛЕНО НА ПОВНЕ ОЧИЩЕННЯ)
+                if get_setting('trading_enabled'):
+                    async_ex = None
+                    try:
+                        async_ex = await get_auth_exchange_client()
+                        ccxt_futures_symbol = resolve_ccxt_futures_symbol(async_ex, symbol)
+                        await cancel_all_exchange_orders_for_symbol(async_ex, symbol, ccxt_futures_symbol)
+                    except Exception as clean_err:
+                        print(f"Помилка очищення ордерів при стопі для {symbol}: {clean_err}")
+                    finally:
+                                            pass
+
+                async with active_signals_lock:
+                    remove_active_signal(symbol, signal['timeframe'])
+                    try:
+                        for s in list(active_signals):
+                            if s['symbol'] == symbol and s['timeframe'] == signal['timeframe']:
+                                active_signals.remove(s)
+                    except ValueError:
+                        pass
+                    active_monitors.pop((symbol, signal['timeframe']), None)
                 break
 
+        # --- КРОК 2: Перевірка безубитку (БУ) ---
         if breakeven and 0 in hit_tps:
             be_hit = (direction == 'SHORT' and price >= entry) or \
                      (direction == 'LONG' and price <= entry)
@@ -715,9 +1228,6 @@ async def monitor_signal(bot, signal, active_signals):
                 pos_contracts = signal.get('pos_contracts', 0.0)
                 maker, taker = get_fees_for_exchange()
                 
-                use_dobar_setting = get_setting('use_dobar')
-                if use_dobar_setting is None:
-                    use_dobar_setting = True
                 avg_entry = entry
                 if use_dobar_setting and signal.get('dobar_low') is not None and signal.get('dobar_high') is not None:
                     dobar_mid = (signal['dobar_low'] + signal['dobar_high']) / 2.0
@@ -747,40 +1257,146 @@ async def monitor_signal(bot, signal, active_signals):
                     else:
                         print(f"Помилка відправки БУ {symbol}: {e}")
 
+                # ОЧИЩЕННЯ ЛІМІТОК ПРИ БУ (ВИПРАВЛЕНО НА ПОВНЕ ОЧИЩЕННЯ)
+                if get_setting('trading_enabled'):
+                    async_ex = None
+                    try:
+                        async_ex = await get_auth_exchange_client()
+                        ccxt_futures_symbol = resolve_ccxt_futures_symbol(async_ex, symbol)
+                        await cancel_all_exchange_orders_for_symbol(async_ex, symbol, ccxt_futures_symbol)
+                    except Exception as clean_err:
+                        print(f"Помилка очищення ордерів при БУ для {symbol}: {clean_err}")
+                    finally:
+                                            pass
+
                 close_signal_stat(signal.get('stat_id'), 'tp', round(total_profit, 1), price)
-                remove_active_signal(symbol, signal['timeframe'])
+                remove_active_signal(symbol, timeframe)
                 if signal in active_signals:
                     active_signals.remove(signal)
                 break
 
+# --- КРОК 3: Перевірка Take Profit (Гібридне фізичне/віртуальне детектування) ---
         new_hits = set()
-        for i, (tp_price, prob, pct) in enumerate(tps):
-            if direction == 'SHORT' and price <= tp_price:
-                new_hits.add(i)
-            elif direction == 'LONG' and price >= tp_price:
-                new_hits.add(i)
+        
+        # Якщо авто-торгівля увімкнена і в базі збережені ID ордерів — відстежуємо статус виконання на біржі
+        if get_setting('trading_enabled') and signal.get('tp_order_ids'):
+            async_ex = None
+            try:
+                async_ex = await get_auth_exchange_client()
+                ccxt_futures_symbol = resolve_ccxt_futures_symbol(async_ex, symbol)
+                
+                for idx, tp_order_id in enumerate(signal['tp_order_ids']):
+                    if idx in hit_tps:
+                        continue # Пропускаємо вже зафіксовані цілі
+                        
+                    try:
+                        order_info = await async_ex.fetch_order(tp_order_id, ccxt_futures_symbol)
+                        if order_info.get('status') == 'closed': # Ордер фізично повністю виконався!
+                            new_hits.add(idx)
+                            print(f"🎯 [ФІЗИЧНИЙ ТЕЙК] Біржа підтвердила закриття TP{idx+1} (ID: {tp_order_id}) по {symbol}")
+                    except Exception as order_err:
+                        # Якщо ордер скасовано або не знайдено — ігноруємо, не вважаємо за хіт
+                        pass
+            except Exception as ex_err:
+                print(f"Помилка відстеження статусів ліміток для {symbol}: {ex_err}")
+            finally:
+                            pass
+                            
+        else:
+            # Віртуальний фолбек за ціною (для паперової торгівлі, коли ордери не виставляються)
+            for i, (tp_price, _, _) in enumerate(tps):
+                if direction == 'SHORT' and price <= tp_price:
+                    new_hits.add(i)
+                elif direction == 'LONG' and price >= tp_price:
+                    new_hits.add(i)
 
         if new_hits - hit_tps:
             hit_tps = hit_tps | new_hits
-            
             signal['hit_tps'] = hit_tps
             save_active_signals(active_signals)
             
             elapsed = elapsed_str()
             print(f"✅ {symbol} досягнуто TP: {hit_tps}")
 
+# Переведення стопу в БУ при першому тейку
             if 0 in hit_tps and not breakeven:
                 breakeven = True
                 signal['show_dobar'] = False
                 
-                use_dobar_setting = get_setting('use_dobar')
-                if use_dobar_setting is None:
-                    use_dobar_setting = True
-                    
-                if use_dobar_setting and signal.get('dobar_low') is not None and signal.get('dobar_high') is not None:
+                # ДИНАМІЧНИЙ РОЗРАХУНОК РЕАЛЬНОГО БЕЗУБИТКУ (Виправлено БУ для Dobar)
+                if use_dobar_setting and dobar_filled_state and signal.get('dobar_low') is not None and signal.get('dobar_high') is not None:
                     dobar_mid = (signal['dobar_low'] + signal['dobar_high']) / 2.0
                     avg_entry = (entry + dobar_mid) / 2.0
-                    signal['stop_loss'] = avg_entry
+                else:
+                    avg_entry = entry
+                    
+                signal['stop_loss'] = avg_entry
+                
+                # Оновлення стоп-лоссу в БУ на самій біржі (ЧЕРЕЗ ПОВНУ ПЕРЕБУДОВУ СІТКИ GRID RESET З ЗАТРИМКОЮ)
+                if get_setting('trading_enabled'):
+                    async_ex = None
+                    try:
+                        async_ex = await get_auth_exchange_client()
+                        ccxt_futures_symbol = resolve_ccxt_futures_symbol(async_ex, symbol)
+                        
+                        # 1. Повністю скасовуємо всі ордери по монеті на біржі за допомогою нашого універсального хелпера
+                        await cancel_all_exchange_orders_for_symbol(async_ex, symbol, ccxt_futures_symbol)
+                        
+                        # Надійно вичікуємо зачистку ордерів двигуном біржі (запобігає Race Condition)
+                        await asyncio.sleep(1.5)
+                        
+                        # 2. Виставляємо новий на рівні БУ (як STOP_MARKET з reduceOnly та ЧІТКИМ ФАКТИЧНИМ ОБ'ЄМОМ)
+                        sl_volume = float(async_ex.amount_to_precision(ccxt_futures_symbol, active_qty))
+                        
+                        sl_price_str = async_ex.price_to_precision(ccxt_futures_symbol, avg_entry)
+                        sl_params = {
+                            'stopPrice': float(sl_price_str),
+                            'reduceOnly': True
+                        }
+                        new_sl_order = await async_ex.create_order(
+                            symbol=ccxt_futures_symbol,
+                            type='STOP_MARKET',
+                            side=exit_side,
+                            amount=sl_volume,  # Передаємо фактичний об'єм позиції на біржі!
+                            params=sl_params
+                        )
+                        signal['stop_loss_id'] = new_sl_order["id"]
+                        
+                        # 3. Виставляємо залишкові Take-Profit лімітки
+                        active_starting_volume = total_expected if dobar_filled_state else (total_expected * 0.5)
+                        tp_step_volume = float(async_ex.amount_to_precision(ccxt_futures_symbol, active_starting_volume / 4))
+                        new_tp_ids = []
+                        
+                        for idx, (tp_price, _, _) in enumerate(tps[:4]):
+                            if idx in hit_tps:
+                                continue # Пропускаємо вже взяті цілі
+                                
+                            current_tp_vol = tp_step_volume
+                            if idx == 3:
+                                current_tp_vol = float(async_ex.amount_to_precision(
+                                    ccxt_futures_symbol, active_starting_volume - (tp_step_volume * 3)
+                                ))
+                            if current_tp_vol <= 0:
+                                continue
+                                
+                            tp_price_str = async_ex.price_to_precision(ccxt_futures_symbol, tp_price)
+                            tp_order = await async_ex.create_order(
+                                symbol=ccxt_futures_symbol,
+                                type='limit',
+                                side=exit_side,
+                                amount=current_tp_vol,
+                                price=float(tp_price_str),
+                                params={'reduceOnly': True}
+                            )
+                            new_tp_ids.append(tp_order["id"])
+                        
+                        signal['tp_order_ids'] = new_tp_ids
+                        
+                        print(f"🔄 Стоп-лосс на біржі успішно переведено в безубиток для {symbol} (впроваджено Grid Reset та Dobar-Cancel)")
+                    except Exception as sl_be_err:
+                        print(f"Помилка переведення стопу в БУ на біржі для {symbol}: {sl_be_err}")
+                    finally:
+                                            pass
                 else:
                     signal['stop_loss'] = entry
                 
@@ -848,11 +1464,8 @@ async def monitor_signal(bot, signal, active_signals):
                 pos_contracts = signal.get('pos_contracts', 0.0)
                 maker, taker = get_fees_for_exchange()
                 
-                use_dobar_setting = get_setting('use_dobar')
-                if use_dobar_setting is None:
-                    use_dobar_setting = True
                 avg_entry = entry
-                if use_dobar_setting and signal.get('dobar_low') is not None and signal.get('dobar_high') is not None:
+                if use_dobar_setting and signal.get('dobar_low', None) is not None and signal.get('dobar_high', None) is not None:
                     dobar_mid = (signal['dobar_low'] + signal['dobar_high']) / 2.0
                     avg_entry = (entry + dobar_mid) / 2.0
                     
@@ -868,7 +1481,7 @@ async def monitor_signal(bot, signal, active_signals):
 
                 msg_lines.append(f"🎯 TP{last_tp+1}: {tps[last_tp][0]} ✅ ({elapsed_str})")
                 msg_lines.append(f"💰 Загальний прибуток: +{round(total_profit, 1)}% (<b>+${pnl_usd:.2f}</b>)")
-                msg_lines.append(f"🏁 Сигнал закрито")
+                msg_lines.append(f"🏁 Сигнал закриюто")
 
                 try:
                     await bot.send_message(chat_id=CHAT_ID, text="\n".join(msg_lines),
@@ -882,10 +1495,28 @@ async def monitor_signal(bot, signal, active_signals):
                     else:
                         print(f"Помилка відправки закриття {symbol}: {e}")
 
+                # ОЧИЩЕННЯ ОРДЕРІВ ПРИ ПОВНОМУ ТЕЙКУ (ВИПРАВЛЕНО НА ПОВНЕ ОЧИЩЕННЯ)
+                if get_setting('trading_enabled'):
+                    async_ex = None
+                    try:
+                        async_ex = await get_auth_exchange_client()
+                        ccxt_futures_symbol = resolve_ccxt_futures_symbol(async_ex, symbol)
+                        await cancel_all_exchange_orders_for_symbol(async_ex, symbol, ccxt_futures_symbol)
+                    except Exception as clean_err:
+                        print(f"Помилка очищення ордерів при закритті для {symbol}: {clean_err}")
+                    finally:
+                                            pass
+
                 close_signal_stat(signal.get('stat_id'), 'tp', round(total_profit, 1), price)
-                remove_active_signal(symbol, signal['timeframe'])
-                if signal in active_signals:
-                    active_signals.remove(signal)
+                async with active_signals_lock:
+                    remove_active_signal(symbol, timeframe)
+                    try:
+                        for s in list(active_signals):
+                            if s['symbol'] == symbol and s['timeframe'] == timeframe:
+                                active_signals.remove(s)
+                    except ValueError:
+                        pass
+                    active_monitors.pop((symbol, timeframe), None)
                 break
 
 
@@ -902,6 +1533,61 @@ async def scan_and_send(bot, active_signals, timeframes, scan_logs=None):
         
     is_scanning = True
     try:
+        # === ВПРОВАДЖЕННЯ PORTFOLIO RISK CIRCUIT BREAKERS ===
+        portfolio_size = get_setting('portfolio_size') or 1000.0
+        trading_blocked_by_circuit_breaker = False
+        block_reason = ""
+        
+        # 1. Запобіжник: Максимальний ліміт використаної маржі (Margin Cap)
+        max_margin_pct = get_setting('max_portfolio_margin_pct') or 50.0
+        max_allowed_margin_usd = portfolio_size * (max_margin_pct / 100.0)
+        
+        current_used_margin = sum(float(s.get('margin_required', 0.0)) for s in active_signals)
+        if current_used_margin >= max_allowed_margin_usd:
+            trading_blocked_by_circuit_breaker = True
+            block_reason = f"Використана маржа (${current_used_margin:.2f}) перевищує ліміт (${max_allowed_margin_usd:.2f})"
+
+        # 2. Запобіжник: Денний ліміт збитків (Daily Drawdown Breaker)
+        if not trading_blocked_by_circuit_breaker:
+            daily_pnl = get_daily_pnl_usd()
+            max_daily_loss_pct = get_setting('max_daily_loss_pct') or 3.0
+            max_allowed_daily_loss_usd = portfolio_size * (max_daily_loss_pct / 100.0)
+            
+            if daily_pnl < 0 and abs(daily_pnl) >= max_allowed_daily_loss_usd:
+                trading_blocked_by_circuit_breaker = True
+                block_reason = f"Добовий збиток (${daily_pnl:.2f}) перевищив ліміт (${max_allowed_daily_loss_usd:.2f})"
+
+        # 3. Запобіжник: Серія збиткових угод поспіль (Consecutive Loss Cooldown)
+        if not trading_blocked_by_circuit_breaker:
+            losses_limit = get_setting('consecutive_losses_limit') or 3
+            consecutive_losses = get_consecutive_losses_count(limit=losses_limit)
+            
+            if consecutive_losses >= losses_limit:
+                last_closed_str = get_last_trade_closed_at()
+                if last_closed_str:
+                    try:
+                        last_closed = pd.to_datetime(last_closed_str)
+                        if last_closed.tz is None:
+                            last_closed = last_closed.tz_localize('UTC')
+                        
+                        now_utc = datetime.now(timezone.utc)
+                        elapsed_hours = (now_utc - last_closed).total_seconds() / 3600.0
+                        cooldown_hours = get_setting('cooldown_hours') or 12
+                        
+                        if elapsed_hours < cooldown_hours:
+                            remaining_hours = cooldown_hours - elapsed_hours
+                            trading_blocked_by_circuit_breaker = True
+                            block_reason = f"Серія з {consecutive_losses} стопів. Павза діятиме ще {remaining_hours:.1f} год."
+                    except Exception as cooldown_err:
+                        print(f"Помилка розрахунку часу кулдауну: {cooldown_err}")
+
+        # Логування стану блокування в консоль та лог-файл
+        if trading_blocked_by_circuit_breaker:
+            print(f"⚠️ [RISK SHIELD] Реальні торги заблоковані: {block_reason}. Бот працює в режимі сканера.")
+            if scan_logs is not None:
+                scan_logs.append(f"ℹ️ [RISK SHIELD] Торги призупинені: {block_reason}. Увімкнено режим сканера.")
+        # ====================================================
+
         all_signals = await scan_all(timeframes, scan_logs=scan_logs)
         new_count = 0
         max_signals = get_setting('max_active_signals')
@@ -924,10 +1610,55 @@ async def scan_and_send(bot, active_signals, timeframes, scan_logs=None):
                 continue
 
             try:
-                risk_usd, pos_usd, pos_contracts, margin_required, is_averaged, avg_entry = calculate_position_size_v2(
-                    signal['entry'], signal.get('stop_loss'), signal.get('dobar_low'), signal.get('dobar_high')
+# --- ІНТЕГРАЦІЯ PORTFOLIO RISK ENGINE (CPF) ---
+                # 1. Отримуємо ретерни для цільової монети
+                target_returns = await get_returns_for_correlation(signal['symbol'], timeframe="1h", limit=30)
+                
+                # 2. Отримуємо ретерни для всіх вже відкритих угод
+                active_returns_list = []
+                for active_sig in active_signals:
+                    act_ret = await get_returns_for_correlation(active_sig['symbol'], timeframe="1h", limit=30)
+                    if act_ret is not None:
+                        active_returns_list.append(act_ret)
+                        
+                # 3. Обчислюємо Correlation Penalty Factor (CPF)
+                from risk_engine import PortfolioRiskEngine
+                if target_returns is not None:
+                    cpf, avg_corr = PortfolioRiskEngine.calculate_cpf(target_returns, active_returns_list)
+                else:
+                    cpf, avg_corr = 1.0, 0.0
+                    
+                # 4. ВИЗНАЧАЄМО ПАРАМЕТРИ РИЗИКУ ДО ВИКЛИКУ МЕТОДУ ОБЧИСЛЕННЯ (Виправлення NameError)
+                portfolio_size = get_setting('portfolio_size') or 1000.0
+                risk_pct = get_setting('risk_pct') or 1.0
+                leverage = get_setting('leverage') or 20
+                use_dobar = get_setting('use_dobar')
+                if use_dobar is None:
+                    use_dobar = True
+                    
+                # 5. Обчислюємо фінальні параметри ризику
+                sizing_res = PortfolioRiskEngine.calculate_position_size_v3(
+                    portfolio_size=portfolio_size,
+                    risk_pct=risk_pct,
+                    leverage=leverage,
+                    entry=signal['entry'],
+                    stop_loss=signal.get('stop_loss'),
+                    cpf=cpf,
+                    use_dobar=use_dobar,
+                    dobar_low=signal.get('dobar_low'),
+                    dobar_high=signal.get('dobar_high')
                 )
                 
+                risk_usd = sizing_res["risk_usd"]
+                pos_usd = sizing_res["pos_usd"]
+                pos_contracts = sizing_res["pos_contracts"]
+                margin_required = sizing_res["margin_required"]
+                is_averaged = sizing_res["is_averaged"]
+                avg_entry = sizing_res["actual_entry"]
+
+                if cpf < 1.0:
+                    print(f"⚠️ [CPF PENALTY] Кореляція {avg_corr:.2f} з портфелем! Зменшено ризик на {(1-cpf)*100:.1f}%. Штрафний CPF: {cpf:.2f}")
+                # -----------------------------------------------------
                 signal['pos_usd'] = pos_usd
                 signal['pos_contracts'] = pos_contracts
                 signal['margin_required'] = margin_required
@@ -947,6 +1678,10 @@ async def scan_and_send(bot, active_signals, timeframes, scan_logs=None):
                     pos_contracts=pos_contracts,
                     margin_required=margin_required
                 )
+
+                # Додаємо попередження у Telegram, якщо торгівля призупинена лімітами
+                if trading_blocked_by_circuit_breaker:
+                    signal_text += f"\n\n🛑 <b>Увага:</b> Ордери на біржі не виставлялись через запобіжник ризику (<i>{block_reason}</i>)."
 
                 ccxt_symbol = symbol_clean[:-4] + '/USDT'
                 candles_df = await get_candles_main(ccxt_symbol, signal['timeframe'])
@@ -969,10 +1704,11 @@ async def scan_and_send(bot, active_signals, timeframes, scan_logs=None):
                 signal['chart_message_id'] = sent.message_id
                 signal['symbol'] = symbol_clean
 
-                active_signals.append(signal)
-                recently_sent.add(symbol_clean)
-                save_active_signals(active_signals)
-                new_count += 1
+                async with active_signals_lock:
+                    active_signals.append(signal)
+                    recently_sent.add(symbol_clean)
+                    save_active_signals(active_signals)
+                    new_count += 1
 
                 signal_id = add_signal_stat(
                     symbol_clean, signal['timeframe'],
@@ -981,7 +1717,80 @@ async def scan_and_send(bot, active_signals, timeframes, scan_logs=None):
                 )
                 signal['stat_id'] = signal_id
 
-                asyncio.create_task(monitor_signal(bot, signal, active_signals))
+                # === НАДСИЛАННЯ ОРДЕРІВ НА БІРЖУ ===
+                # Угода відкривається ТІЛЬКИ якщо торгівля увімкнена і НЕ заблокована запобіжниками
+                if get_setting('trading_enabled') and not trading_blocked_by_circuit_breaker:
+                    testnet_mode = get_setting('testnet_enabled')
+                    
+                    try:
+                        logger_msg = "TESTNET" if testnet_mode else "PROD"
+                        print(f"⚡  Надсилання ордерів на {logger_msg} для {symbol_clean}...")
+                        
+                        trade_report = await global_executor.execute_order_grid(
+                            symbol=symbol_clean,
+                            direction=signal['direction'],
+                            entry_price=signal['entry'],
+                            stop_loss=signal.get('stop_loss'),
+                            tps=signal['tps'],
+                            dobar_low=signal.get('dobar_low'),
+                            dobar_high=signal.get('dobar_high'),
+                            pos_contracts=pos_contracts,
+                            use_dobar=get_setting('use_dobar')
+                        )
+                        
+                        if trade_report["status"] == "success":
+                            print(f"✅ Сітка ордерів успішно активована для {symbol_clean}!")
+                            # Розраховуємо чисту затримку мережевого виконання (latency в ms)
+                            try:
+                                signal_created_dt = pd.to_datetime(signal.get('created_at', datetime.now(timezone.utc).isoformat()))
+                                exec_dt = pd.to_datetime(trade_report.get('executed_at_ms', time.time() * 1000), unit='ms', utc=True)
+                                latency_ms = int((exec_dt - signal_created_dt.tz_convert('UTC')).total_seconds() * 1000.0)
+                            except Exception:
+                                latency_ms = 0
+                                
+                            # Записуємо звіт про прослизання та затримку виконання у базу
+                            from database import log_order_execution
+                            log_order_execution(
+                                signal_id=signal['stat_id'],
+                                symbol=symbol_clean,
+                                order_type='entry_market',
+                                side=signal['direction'],
+                                requested_price=signal['entry'],
+                                executed_price=trade_report.get('entry_fill_price', signal['entry']),
+                                executed_qty=trade_report.get('entry_fill_qty', pos_contracts * 0.5 if get_setting('use_dobar') else pos_contracts),
+                                fee_paid=trade_report.get('entry_fee', 0.0),
+                                latency_ms=latency_ms
+                            )
+
+                            signal['tp_order_ids'] = trade_report["take_profit_ids"]
+                            signal['dobar_order_id'] = trade_report["entry_dobar_id"]
+                            signal['stop_loss_id'] = trade_report["stop_loss_id"]
+                            signal['dobar_filled_state'] = False
+                            save_active_signals(active_signals)
+                            
+                            await bot.send_message(
+                                chat_id=CHAT_ID,
+                                text=(
+                                    f"🚀 <b>Позицію успішно відкрито на біржі ({logger_msg})!</b>\n\n"
+                                    f"📦 Токен: <b>#{symbol_clean}</b> | {signal['timeframe']}\n"
+                                    f"⚖️ Напрямок: <b>{signal['direction']}</b>\n"
+                                    f"💵 Об'єм: <b>${pos_usd:.2f}</b> ({pos_contracts:.4f} {symbol_clean[:-4]})\n"
+                                    f"🛑 Stop-Loss та Take-Profit ордери виставлені на біржі."
+                                ),
+                                parse_mode='HTML',
+                                reply_to_message_id=sent.message_id
+                            )
+                        else:
+                            print(f"❌ Не вдалося виставити ордери для {symbol_clean}: {trade_report['error']}")
+                            
+                    except Exception as exec_err:
+                        print(f"❌ Критичний збій торгового модуля для {symbol_clean}: {exec_err}")
+                # ============================================
+
+                task_key = (symbol_clean, signal['timeframe'])
+                if task_key not in active_monitors or active_monitors[task_key].done():
+                    task = asyncio.create_task(monitor_signal(bot, signal, active_signals))
+                    active_monitors[task_key] = task
                 await asyncio.sleep(5)
 
             except Exception as e:
@@ -1001,8 +1810,52 @@ async def scan_and_send(bot, active_signals, timeframes, scan_logs=None):
 # TELEGRAM UPDATE HANDLER
 # ─────────────────────────────────────────────
 
+def main_reply_keyboard():
+    """Створює постійне нижнє Reply-меню для зручної навігації"""
+    keyboard = [
+        [KeyboardButton("🔍 Сканувати зараз"), KeyboardButton("📊 Статистика")],
+        [KeyboardButton("⏳ Активні сигнали"), KeyboardButton("📈  Аналітика виконання")],
+        [KeyboardButton("⚙️ Налаштування"), KeyboardButton("ℹ️ Про бота")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
+
+
+async def scheduled_report_loop(bot):
+    """
+    Фоновий таймер, що автоматично надсилає звіт виконання (Slippage & Latency)
+    2 рази на добу строго о 09:00 та 21:00 за UTC.
+    """
+    print("📢 Запуск сервісу автоматичної розсилки аналітичних звітів (2 рази на добу)...")
+    while True:
+        now = datetime.now(timezone.utc)
+        
+        # Розраховуємо час до наступного автоматичного звіту (09:00 або 21:00 UTC)
+        if now.hour < 9:
+            next_report = now.replace(hour=9, minute=0, second=0, microsecond=0)
+        elif now.hour < 21:
+            next_report = now.replace(hour=21, minute=0, second=0, microsecond=0)
+        else:
+            # Наступний день о 09:00 UTC
+            next_report = (now + pd.Timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+            
+        sleep_seconds = (next_report - now).total_seconds()
+        # Безпечний зсув на 5 секунд
+        await asyncio.sleep(sleep_seconds + 5)
+        
+        try:
+            from database import get_execution_analytics_summary
+            report_text = get_execution_analytics_summary()
+            await bot.send_message(
+                chat_id=CHAT_ID,
+                text=f"📢 <b>АВТОМАТИЧНИЙ ДОБОВИЙ ЗВІТ ВИКОНАННЯ</b>\n\n{report_text}",
+                parse_mode='HTML'
+            )
+            print("📢 Автоматичний аналітичний звіт успішно надіслано.")
+        except Exception as e:
+            print(f"Помилка автоматичної розсилки звітів: {e}")
+
 async def handle_updates(bot, active_signals):
-    global active_timeframe, exchange
+    global active_timeframe, exchange, global_executor
     offset = None
 
     while True:
@@ -1023,23 +1876,22 @@ async def handle_updates(bot, active_signals):
                     if text == '/start':
                         await bot.send_message(
                             chat_id=chat_id,
-                            text="🤖 Сигнальний бот\nОберіть дію:",
-                            reply_markup=main_menu_keyboard()
-                        )
-
-                    elif text == '/settings':
-                        await bot.send_message(
-                            chat_id=chat_id,
-                            text=get_settings_text(),
-                            reply_markup=main_settings_keyboard(),
+                            text="🤖 <b>Сигнальний бот успішно запущено!</b>\nВітаємо.",
+                            reply_markup=main_reply_keyboard(),
                             parse_mode='HTML'
                         )
 
-                    elif text == '/stats':
+                    elif text == '📊 Статистика' or text == '/stats':
                         summary = get_stats_summary()
                         await bot.send_message(chat_id=chat_id, text=summary, parse_mode='HTML')
 
-                    elif text == '/scan':
+                    elif text == '📈  Аналітика виконання':
+                        # Надсилаємо наш новий аналітичний дашборд
+                        from database import get_execution_analytics_summary
+                        report = get_execution_analytics_summary()
+                        await bot.send_message(chat_id=chat_id, text=report, parse_mode='HTML')
+
+                    elif text == '🔍 Сканувати зараз' or text == '/scan':
                         if is_scanning:
                             await bot.send_message(chat_id=chat_id, text="⏳ Сканування вже виконується автоматичним таймером або іншим процесом. Будь ласка, зачекайте...")
                             continue
@@ -1071,7 +1923,7 @@ async def handle_updates(bot, active_signals):
                                     parse_mode='HTML'
                                 )
 
-                    elif text == '/active':
+                    elif text == '⏳ Активні сигнали' or text == '/active':
                         if not active_signals:
                             msg = "⏳ Активних сигналів немає"
                         else:
@@ -1083,6 +1935,30 @@ async def handle_updates(bot, active_signals):
                                     f"Entry: {s['entry']}"
                                 )
                             msg = "\n".join(lines)
+                        await bot.send_message(chat_id=chat_id, text=msg)
+
+                    elif text == '⚙️ Налаштування' or text == '/settings':
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=get_settings_text(),
+                            reply_markup=main_settings_keyboard(),
+                            parse_mode='HTML'
+                        )
+
+                    elif text == 'ℹ️ Про бота' or text == '/info':
+                        htf = get_setting('htf_bias_enabled')
+                        min_prob = get_setting('min_tp1_prob')
+                        stop_mult = get_setting('stop_atr_mult')
+                        msg = (
+                            f"🤖 Сигнальний бот\n\n"
+                            f"📊 Біржа: Binance / MEXC Futures\n"
+                            f"⏱ Таймфрейми: 5m · 15m · 30m · 1h · 4h · 1d\n"
+                            f"🔍 Індикатори: EMA · RSI · ATR · MACD · BB\n"
+                            f"✅ Фільтр: TP1 ≥ {min_prob}% · мін. 12 угод\n"
+                            f"🛑 Стоп-лосс: ATR × {stop_mult}\n"
+                            f"↩️ БУ: після досягнення TP1\n"
+                            f"🔍 HTF фільтр: {'увімк.' if htf else 'вимк.'}"
+                        )
                         await bot.send_message(chat_id=chat_id, text=msg)
 
                 if update.callback_query:
@@ -1141,7 +2017,11 @@ async def handle_updates(bot, active_signals):
                             
                             if success:
                                 if scan_logs:
-                                    log_text = "\n".join(scan_logs)
+                                    # БЕЗПЕЧНЕ ЕКРАНУВАННЯ ДЛЯ ЗАПОБІГАННЯ ПОМИЛЦІ PARSING ENTITIES
+                                    import html
+                                    escaped_logs = [html.escape(line) for line in scan_logs]
+                                    log_text = "\n".join(escaped_logs)
+                                    
                                     if len(log_text) > 3900:
                                         log_text = log_text[:3800] + "\n\n⚠️ <i>(Лог обрізано через ліміт повідомлення Telegram)</i>"
                                     
@@ -1241,7 +2121,7 @@ async def handle_updates(bot, active_signals):
                     elif data == 'cfg_close':
                         await bot.send_message(
                             chat_id=chat_id,
-                            text="⚙️ Меню налаштувань закрито."
+                            text="⚙️"
                         )
 
                     elif data == 'toggle_exchange':
@@ -1257,6 +2137,13 @@ async def handle_updates(bot, active_signals):
                         
                         exchange = get_exchange_client(async_mode=False)
                         scanner.exchange = get_exchange_client(async_mode=True)
+                        
+                        # ГАРАНТОВАНЕ ГАРЯЧЕ ОНОВЛЕННЯ ГЛОБАЛЬНОГО ЕКСЕКУТОРА ПРИ ЗМІНІ БІРЖІ (АРХІТЕКТУРНА ПРОБЛЕМА №1)
+                        if global_executor:
+                            await global_executor.close()
+                        global_executor = FuturesExecutor(exchange_id=new_exchange, testnet=get_setting('testnet_enabled'))
+                        await global_executor.initialize()
+                        
                         print(f"🏛 Біржу успішно перемикнуто на: {new_exchange.upper()}")
                         
                         await bot.send_message(
@@ -1373,6 +2260,23 @@ async def handle_updates(bot, active_signals):
                         if current is None:
                             current = True
                         set_setting('use_dobar', not current)
+                        text, markup = risk_keyboard()
+                        await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
+
+                    # ── Перемикання режимів торгівлі та тестнету (ФАЗА А) ──
+                    elif data == 'toggle_trading':
+                        current = get_setting('trading_enabled')
+                        if current is None:
+                            current = True
+                        set_setting('trading_enabled', not current)
+                        text, markup = risk_keyboard()
+                        await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
+
+                    elif data == 'toggle_testnet':
+                        current = get_setting('testnet_enabled')
+                        if current is None:
+                            current = True
+                        set_setting('testnet_enabled', not current)
                         text, markup = risk_keyboard()
                         await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
 
@@ -1532,27 +2436,63 @@ async def wait_until_next_boundary(interval_seconds):
 
 
 async def main():
-    global active_timeframe
+    global active_timeframe, global_executor, exchange, recently_sent
     init_db()
     bot = Bot(token=BOT_TOKEN, request=request)
 
+    try:
+        # Попередньо завантажуємо ринки для синхронного клієнта малювання графіків
+        await asyncio.to_thread(exchange.load_markets)
+    except Exception as e:
+        print(f"Попередження завантаження ринків sync клієнта: {e}")
+
     active_signals = load_active_signals()
-    print(f"Завантажено {len(active_signals)} активних сигналів з диску")
+    print(f"Завантажено {len(active_signals)} active сигналів з диску")
+
+    # Відновлюємо recently_sent з активних сигналів при старті
+    recently_sent = {s['symbol'] for s in active_signals}
+    print(f"Синхронізація recently_sent при старті: {recently_sent}")
+
+    # Ініціалізуємо персистентного глобального виконавця
+    testnet_mode = get_setting('testnet_enabled')
+    exchange_name = get_setting('exchange_name') or 'binance'
+    global_executor = FuturesExecutor(exchange_id=exchange_name, testnet=testnet_mode)
+    await global_executor.initialize()
+
+    # === ФАЗА Б: ЗАПУСК ПРИМИРЕННЯ ТА ЛІКУВАННЯ ПОЗИЦІЙ ПРИ СТАРТІ ===
+    await reconcile_active_signals_state(bot, active_signals)
+    # ================================================================
+
+    # --- ІНІЦІАЛІЗАЦІЯ BACKGROUND RECONCILIATION WORKER ---
+    from reconciler import ReconciliationWorker
+    reconciler = ReconciliationWorker(
+        bot=bot,
+        chat_id=CHAT_ID,
+        get_auth_exchange_client_fn=get_auth_exchange_client,
+        resolve_ccxt_futures_symbol_fn=resolve_ccxt_futures_symbol,
+        get_active_position_qty_fn=get_active_position_qty,
+        cancel_all_exchange_orders_for_symbol_fn=cancel_all_exchange_orders_for_symbol,
+        active_signals_ref=active_signals,
+        active_signals_lock=active_signals_lock,
+        active_monitors=active_monitors,
+        interval_seconds=120  # Звіряти стан кожні 2 хвилини
+    )
+    await reconciler.start()
+    # ------------------------------------------------------
 
     for signal in list(active_signals):
         if signal.get('chart_message_id'):
             is_still_active = await reconcile_historical_gap(bot, signal, active_signals)
             
             if is_still_active:
-                asyncio.create_task(monitor_signal(bot, signal, active_signals))
-                print(f"🔄 Відновлено живий моніторинг: {signal['symbol']} {signal['timeframe']}")
-                if not signal.get('stat_id'):
-                    signal_id = add_signal_stat(
-                        signal['symbol'], signal['timeframe'],
-                        signal['direction'], signal['entry'],
-                        signal.get('tier', '🟢')
-                    )
-                    signal['stat_id'] = signal_id
+                # Захищений запуск моніторингу унікальним таском
+                task_key = (signal['symbol'], signal['timeframe'])
+                if task_key not in active_monitors or active_monitors[task_key].done():
+                    task = asyncio.create_task(monitor_signal(bot, signal, active_signals))
+                    active_monitors[task_key] = task
+                    print(f"🔄 Відновлено живий моніторинг: {signal['symbol']} {signal['timeframe']}")
+                else:
+                    print(f"⚠️ Моніторинг для {signal['symbol']} вже активний, пропуск дублюючого таска.")
 
     save_active_signals(active_signals)
 
@@ -1661,7 +2601,14 @@ async def main():
         loop_1h(), loop_4h(), loop_1d(),
         daily_stats(), clear_recently_sent(),
         handle_updates(bot, active_signals),
+        scheduled_report_loop(bot)  # Автоматичний звіт 2 рази на добу
     )
+
+# Безпечно закриваємо ресурси Singleton сесії перед виходом
+    global async_exchange
+    if async_exchange:
+        await async_exchange.close()
+        print("🏛 Глобальну Singleton-сесію CCXT успішно закрито.")
 
 async def safe_main():
     try:
@@ -1671,4 +2618,5 @@ async def safe_main():
         import traceback
         traceback.print_exc()
 
-asyncio.run(safe_main())
+if __name__ == '__main__':
+    asyncio.run(safe_main())
