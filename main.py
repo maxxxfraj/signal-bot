@@ -1636,7 +1636,7 @@ async def scan_and_send(bot, active_signals, timeframes, scan_logs=None):
                 if use_dobar is None:
                     use_dobar = True
                     
-                # 5. Обчислюємо фінальні параметри ризику
+                # 5. Обчислюємо фінальні параметри ризику з урахуванням Kaufman ER та типу стратегії
                 sizing_res = PortfolioRiskEngine.calculate_position_size_v3(
                     portfolio_size=portfolio_size,
                     risk_pct=risk_pct,
@@ -1645,6 +1645,8 @@ async def scan_and_send(bot, active_signals, timeframes, scan_logs=None):
                     stop_loss=signal.get('stop_loss'),
                     cpf=cpf,
                     use_dobar=use_dobar,
+                    er=signal.get('er', 0.50),  # Передаємо Кількісну трендовість
+                    strategy_type=signal.get('strategy_type', 'ema_rsi'), # Передаємо тип стратегії
                     dobar_low=signal.get('dobar_low'),
                     dobar_high=signal.get('dobar_high')
                 )
@@ -1655,6 +1657,7 @@ async def scan_and_send(bot, active_signals, timeframes, scan_logs=None):
                 margin_required = sizing_res["margin_required"]
                 is_averaged = sizing_res["is_averaged"]
                 avg_entry = sizing_res["actual_entry"]
+                rmf = sizing_res.get("rmf", 1.0) # Отримуємо коефіцієнт RMF
 
                 if cpf < 1.0:
                     print(f"⚠️ [CPF PENALTY] Кореляція {avg_corr:.2f} з портфелем! Зменшено ризик на {(1-cpf)*100:.1f}%. Штрафний CPF: {cpf:.2f}")
@@ -1678,6 +1681,9 @@ async def scan_and_send(bot, active_signals, timeframes, scan_logs=None):
                     pos_contracts=pos_contracts,
                     margin_required=margin_required
                 )
+                # Додаємо інформацію про масштабування ризику за фазою ринку в Telegram-звіт
+                if rmf < 1.0 and rmf > 0:
+                    signal_text += f"\n\n⚖️ <b>Ризик-масштаб (RMF):</b> <b>{rmf*100:.0f}%</b> (Знижено об'єм через фазу ринку ER=<i>{signal.get('er', 0.5):.2f}</i>)."
 
                 # Додаємо попередження у Telegram, якщо торгівля призупинена лімітами
                 if trading_blocked_by_circuit_breaker:

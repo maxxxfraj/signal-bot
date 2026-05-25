@@ -343,6 +343,11 @@ async def find_signal(symbol, timeframe, scan_logs=None, btc_df=None):
     open_interest = None
     funding_rate = None
 
+    # Дефолтні значення для зворотної сумісності та розрахунку ризику
+    regime = "STABLE_TREND"
+    er = 0.50
+    z_vol = 0.0
+
     scalp_enabled = get_setting('scalper_mode_enabled')
     if scalp_enabled is None:
         scalp_enabled = True
@@ -404,13 +409,17 @@ async def find_signal(symbol, timeframe, scan_logs=None, btc_df=None):
         
     if regime_filter:
         try:
+            # Використовуємо новий стабільний класифікатор
             classifier = MarketRegimeClassifier()
             classification = classifier.classify(df)
             regime = classification["regime"]
+            er = classification["er"]
+            z_vol = classification["z_vol"]
             
             trend_strategies = ['ema_rsi', 'macd_cross', 'breakout', 'vol_spike']
             mean_reversion_strategies = ['bb_bounce', 'mean_reversion', 'wavetrend_bounce']
             
+            # Фільтрація з урахуванням виявленого фазового стану ринку
             if strategy_type in trend_strategies and regime in ["LOW_VOL_FLAT", "MEAN_REVERSION"]:
                 log_skip(f"⛔ {symbol} {timeframe} {direction} — ринок у ренджі ({regime}), трендовий вхід заблоковано класифікатором", scan_logs)
                 return None
@@ -421,7 +430,7 @@ async def find_signal(symbol, timeframe, scan_logs=None, btc_df=None):
                 log_skip(f"⛔ {symbol} {timeframe} {direction} — ринок у фазі аномальної волатильності/хаосу ({regime}), торгівлю зупинено", scan_logs)
                 return None
         except Exception as e:
-            print(f"Помилка класифікації ринкового режиму для {symbol}: {e}")
+            print(f"Помилка розрахунку фільтра ринкового режиму для {symbol}: {e}")
     # ---------------------------------------------
 
     btc_pass, correlation = await check_btc_and_correlation(symbol, timeframe, df, direction, scan_logs, btc_df)
@@ -589,7 +598,11 @@ async def find_signal(symbol, timeframe, scan_logs=None, btc_df=None):
         'correlation': correlation,
         'funding_rate': funding_rate * 100.0 if funding_rate is not None else None,
         'open_interest': open_interest,
-        'mode': mode
+        'mode': mode,
+        'strategy_type': strategy_type, # Передаємо тип стратегії
+        'regime': regime,               # Передаємо фазу
+        'er': er,                       # Передаємо Kaufman ER
+        'z_vol': z_vol                  # Передаємо Z-Score волатильності
     }
 
 
