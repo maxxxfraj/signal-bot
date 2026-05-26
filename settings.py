@@ -18,75 +18,89 @@ ALL_PAIRS = [
 
 DEFAULT_SETTINGS = {
     'active_timeframe': 'all',
-    'watchlist': ALL_PAIRS.copy(), # Ініціалізуємо ватчліст за замовчуванням усім списком
+    'watchlist': ALL_PAIRS.copy(),
     'active_timeframes': ['5m', '15m', '30m', '1h', '4h', '1d'],
-    'stop_atr_mult': 2.0,      # множник ATR для стопу
-    'tp1_atr_mult': 0.8,       # множник ATR для TP1
-    'min_tp1_prob': 55,        # мінімальна ймовірність TP1 для сигналу
-    'htf_bias_enabled': True,  # фільтр вищого таймфрейму
-    'htf_diff_threshold': 1.0, # поріг різниці EMA для HTF фільтру (%)
-    'max_active_signals': 10,  # максимум активних сигналів одночасно
+    'stop_atr_mult': 2.0,      
+    'tp1_atr_mult': 0.8,       
+    'min_tp1_prob': 55,        
+    'htf_bias_enabled': True,  
+    'htf_diff_threshold': 1.0, 
+    'max_active_signals': 10,  
     
-    # Поля для ризику та вибору біржі
-    'exchange_name': 'binance', # поточна активна біржа: 'binance' або 'mexc'
-    'portfolio_size': 1000.0,   # загальний розмір депозиту в USD
-    'risk_pct': 1.0,            # ризик на одну угоду у відсотках від депо (1%)
-    'leverage': 20,             # кредитне плече (1х - 200х)
-    'use_dobar': True,          # чи використовувати тактику 1 усереднення (добору)
+    'exchange_name': 'binance', 
+    'portfolio_size': 1000.0,   
+    'risk_pct': 1.0,            
+    'leverage': 20,             
+    'use_dobar': True,          
     
-    # Параметри фільтрів
-    'btc_filter_enabled': True,     # Розумний фільтр Біткоїна (Market Beta)
-    'regime_filter_enabled': True,   # Розумний класифікатор ринкового режиму (Trend/Flat)
+    'btc_filter_enabled': True,     
+    'regime_filter_enabled': True,   
     
-    # Параметри фандингу
-    'funding_filter_enabled': True,  # Розумний фандинг-фільтр перегріву ринку
-    'funding_max_limit': 0.05,       # Максимально дозволена ставка фінансування (%)
+    'funding_filter_enabled': True,  
+    'funding_max_limit': 0.05,       
     
-    # Параметри мінімального відкритого інтересу (OI)
-    'oi_filter_enabled': True,       # Розумний фільтр мінімального Open Interest
-    'oi_min_limit': 10.0,            # Мінімально дозволений ліміт OI в мільйонах USD ($10.0M)
+    'oi_filter_enabled': True,       
+    'oi_min_limit': 10.0,            
     
-    # Параметр скальперського режиму
-    'scalper_mode_enabled': True,     # ВИПРАВЛЕНО: Додано кому наприкінці рядка
+    'scalper_mode_enabled': True,     
     
-    # Параметри для Фази А (Торговий модуль на Testnet)
-    'testnet_enabled': True,         # Чи торгувати на демо-депозиті (Testnet)
-    'trading_enabled': True,          # Чи надсилати реальні ордери на біржу при сигналі
+    'testnet_enabled': True,         
+    'trading_enabled': True,
 
-        # Параметри глобальних запобіжників (Portfolio Circuit Breakers)
-    'max_portfolio_margin_pct': 50.0,    # Макс. 50% від депозиту може бути у маржі одночасно
-    'max_daily_loss_pct': 3.0,          # Денний ліміт збитків (3% від депозиту)
-    'consecutive_losses_limit': 3,       # Максимум 3 стопи поспіль, далі cooldown
-    'cooldown_hours': 12,                # Тривалість павзи у торгівлі (12 годин)
+    # Параметри глобальних запобіжників (Portfolio Circuit Breakers)
+    'max_portfolio_margin_pct': 50.0,    
+    'max_daily_loss_pct': 3.0,          
+    'consecutive_losses_limit': 3,       
+    'cooldown_hours': 12                
 }
 
+# Глобальний in-memory кеш для усунення дискового блокування I/O
+_settings_cache = None
+
+
 def load_settings():
+    """Завантажує налаштування з RAM-кешу або зчитує з диска один раз"""
+    global _settings_cache
+    if _settings_cache is not None:
+        return _settings_cache
+        
     if os.path.exists(SETTINGS_FILE):
         try:
             with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                _settings_cache = json.load(f)
+                return _settings_cache
         except Exception as e:
-            print(f"Помилка завантаження налаштувань: {e}")
-    return DEFAULT_SETTINGS.copy()
+            print(f"Помилка завантаження налаштувань з диска: {e}")
+            
+    _settings_cache = DEFAULT_SETTINGS.copy()
+    return _settings_cache
+
 
 def save_settings(settings):
+    """Зберігає налаштування на диск та оновлює оперативний кеш"""
+    global _settings_cache
+    _settings_cache = settings.copy()
     try:
         with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
             json.dump(settings, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"Помилка збереження налаштувань: {e}")
 
+
 def get_setting(key):
+    """Швидке зчитування налаштувань без дискового I/O"""
     settings = load_settings()
     return settings.get(key, DEFAULT_SETTINGS.get(key))
 
+
 def set_setting(key, value):
+    """Швидке оновлення налаштувань з рефрешем кешу"""
     settings = load_settings()
     settings[key] = value
     save_settings(settings)
 
+
 def to_native_float(val):
-    """Кастинг NumPy типів (наприклад, np.float64) до чистих Python float"""
     if val is None:
         return None
     try:
@@ -94,8 +108,8 @@ def to_native_float(val):
     except Exception:
         return val
 
+
 def to_native_int(val):
-    """Кастинг NumPy типів до чистих Python int перед записом у PostgreSQL"""
     if val is None:
         return None
     try:
@@ -103,8 +117,8 @@ def to_native_int(val):
     except Exception:
         return val
 
+
 def get_exchange_client(async_mode=False):
-    """Генерує динамічний клієнт підключення для Binance Futures або MEXC Futures"""
     import ccxt
     if async_mode:
         import ccxt.async_support as ccxt_async
@@ -118,7 +132,7 @@ def get_exchange_client(async_mode=False):
         return lib.mexc({
             'enableRateLimit': True,
             'verify': False,
-            'options': {'defaultType': 'swap'},  # Автоматично підміняє спотові запити на ф'ючерсні
+            'options': {'defaultType': 'swap'},  
             'aiohttp_trust_env': False
         })
     else:
