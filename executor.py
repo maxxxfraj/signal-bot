@@ -188,20 +188,26 @@ class FuturesExecutor:
             )
             result_report["stop_loss_id"] = sl_order["id"]
 
-# --- КРОК 4: 4 Take-Profits (З автоматичним Lot & Notional Guard) ---
+# --- КРОК 4: 4 Take-Profits (З автоматичним Lot & Notional Guard та нелінійним розподілом 50/20/15/15) ---
             new_tp_ids = []
             
             # Отримуємо мінімальний лот контракту на біржі
             min_qty = market['limits']['amount']['min'] or 1.0
             
-            # Розраховуємо плановий об'єм кроку та його номінал
-            planned_step_volume = initial_volume / 4
-            estimated_step_notional = planned_step_volume * tps[0][0]
+            # Нелінійні частки: TP1=50%, TP2=20%, TP3=15%, TP4=15%
+            percentages = [0.50, 0.20, 0.15, 0.15]
             
-            # Якщо крок менший за мінімальний лот АБО за мінімальний номінал у 5.1 USDT:
-            # Об'єднуємо всі залишкові тейки в один великий ордер на першу ціль
-            if planned_step_volume < min_qty or estimated_step_notional < 5.1:
-                logger.info(f"⚠️ [LOT/NOTIONAL GUARD] Крок ({planned_step_volume} / {estimated_step_notional:.2f} USD) нижче лімітів біржі. Об'єднуємо тейки в один.")
+            # Перевіряємо ліміти номіналу та лотності для кожного тейку заздалегідь
+            notional_or_lot_error = False
+            for idx, pct in enumerate(percentages):
+                planned_vol = initial_volume * pct
+                est_notional = planned_vol * tps[idx][0]
+                if planned_vol < min_qty or est_notional < 5.1:
+                    notional_or_lot_error = True
+                    break
+                    
+            if notional_or_lot_error:
+                logger.info(f"⚠️ [LOT/NOTIONAL GUARD] Один з кроків нелінійної сітки виходить за ліміти біржі. Об'єднуємо всі тейки в один.")
                 tp_price_str = self.exchange.price_to_precision(ccxt_symbol, tps[0][0])
                 tp_order = await self.exchange.create_order(
                     symbol=ccxt_symbol,
@@ -213,20 +219,22 @@ class FuturesExecutor:
                 )
                 result_report["take_profit_ids"].append(tp_order["id"])
             else:
-                # Стандартна розділена сітка з 4 тейків
-                tp_step_volume = float(self.exchange.amount_to_precision(ccxt_symbol, planned_step_volume))
-                for idx, (tp_price, _, _) in enumerate(tps[:4]):
-                    current_tp_vol = tp_step_volume
+                # Виставляємо нелінійну сітку
+                accumulated_vol = 0.0
+                for idx, pct in enumerate(percentages):
+                    current_tp_vol = float(self.exchange.amount_to_precision(ccxt_symbol, initial_volume * pct))
                     if idx == 3:
+                        # Останній тейк забирає весь залишок через округлення
                         current_tp_vol = float(self.exchange.amount_to_precision(
-                            ccxt_symbol, initial_volume - (tp_step_volume * 3)
+                            ccxt_symbol, initial_volume - accumulated_vol
                         ))
-
+                    
                     if current_tp_vol <= 0:
                         continue
-
-                    tp_price_str = self.exchange.price_to_precision(ccxt_symbol, tp_price)
-                    logger.info(f"🎯 Виставлення початкового TP{idx+1} на {current_tp_vol} за ціною {tp_price_str}")
+                        
+                    accumulated_vol += current_tp_vol
+                    tp_price_str = self.exchange.price_to_precision(ccxt_symbol, tps[idx][0])
+                    logger.info(f"🎯 Виставлення початкового TP{idx+1} (нелінійний {pct*100:.0f}%) на {current_tp_vol} за ціною {tp_price_str}")
                     
                     tp_order = await self.exchange.create_order(
                         symbol=ccxt_symbol,

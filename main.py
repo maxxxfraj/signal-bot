@@ -713,63 +713,77 @@ async def reconcile_active_signals_state(bot, active_signals):
             else:
                 new_dobar_id = None
                     
-            # --- ВІДНОВЛЕННЯ 3: TAKE-PROFIT (З ЗАХИСТОМ ВІД ПОМИЛКИ -4164) ---
-            new_tp_ids = []
-            tps = signal.get('tps', [])
-            
-            remaining_tps_count = 4 - len(hit_tps)
-            if remaining_tps_count > 0:
-                # Отримуємо найближчу невідкриту ціль тейку
-                next_tp_price = tps[3][0]
-                for idx, (tp_price, _, _) in enumerate(tps[:4]):
-                    if idx not in hit_tps:
-                        next_tp_price = tp_price
-                        break
-                        
-                # Оцінюємо номінал одного кроку
-                estimated_step_notional = (active_qty / remaining_tps_count) * next_tp_price
+# --- ВІДНОВЛЕННЯ 3: TAKE-PROFIT (З НЕЛІНІЙНИМ РОЗПОДІЛОМ 50/20/15/15) ---
+                new_tp_ids = []
+                tps = signal.get('tps', [])
                 
-                # Запобігання помилці -4164 (Якщо менше ніж 5.1 USDT, об'єднуємо залишок в один ордер)
-                if estimated_step_notional < 5.1:
-                    print(f"⚠️ [NOTIONAL GUARD] Номінал кроку ({estimated_step_notional:.2f} USD) менший за ліміт Binance $5. Об'єднуємо тейки в один.")
-                    tp_price_str = async_ex.price_to_precision(ccxt_futures_symbol, next_tp_price)
-                    tp_order = await async_ex.create_order(
-                        symbol=ccxt_futures_symbol,
-                        type='limit',
-                        side=exit_side,
-                        amount=active_qty,
-                        price=float(tp_price_str),
-                        params={'reduceOnly': True}
-                    )
-                    new_tp_ids.append(tp_order['id'])
-                else:
-                    # Стандартна розділена сітка
-                    tp_step_volume = float(async_ex.amount_to_precision(ccxt_futures_symbol, active_qty / remaining_tps_count))
-                    tp_counter = 0
+                remaining_tps_count = 4 - len(hit_tps)
+                if remaining_tps_count > 0:
+                    original_percentages = [0.50, 0.20, 0.15, 0.15]
+                    remaining_pct_sum = sum(original_percentages[i] for i in range(4) if i not in hit_tps)
+                    if remaining_pct_sum <= 0:
+                        remaining_pct_sum = 0.25
+                        
+                    # Отримуємо найближчу невідкриту ціль тейку
+                    next_tp_price = tps[3][0]
                     for idx, (tp_price, _, _) in enumerate(tps[:4]):
-                        if idx in hit_tps:
-                            continue
+                        if idx not in hit_tps:
+                            next_tp_price = tp_price
+                            break
                             
-                        current_tp_vol = tp_step_volume
-                        if tp_counter == remaining_tps_count - 1:
-                            current_tp_vol = float(async_ex.amount_to_precision(
-                                ccxt_futures_symbol, active_qty - (tp_step_volume * (remaining_tps_count - 1))
-                            ))
-                        if current_tp_vol <= 0:
-                            continue
-                            
-                        tp_price_str = async_ex.price_to_precision(ccxt_futures_symbol, tp_price)
-                        print(f"🎯 Відновлення TP{idx+1} на {current_tp_vol} за ціною {tp_price_str}")
+                    # Знаходимо індекс для розрахунку наступного кроку
+                    next_tp_idx = 0
+                    for i, t_val in enumerate(tps):
+                        if t_val[0] == next_tp_price:
+                            next_tp_idx = i
+                            break
+                    next_tp_pct = original_percentages[next_tp_idx]
+                    
+                    planned_step_volume = active_qty * (next_tp_pct / remaining_pct_sum)
+                    estimated_step_notional = planned_step_volume * next_tp_price
+                    
+                    if estimated_step_notional < 5.1:
+                        print(f"⚠️ [NOTIONAL GUARD] Крок менший за ліміт $5. Об'єднуємо тейки в один.")
+                        tp_price_str = async_ex.price_to_precision(ccxt_futures_symbol, next_tp_price)
                         tp_order = await async_ex.create_order(
                             symbol=ccxt_futures_symbol,
                             type='limit',
                             side=exit_side,
-                            amount=current_tp_vol,
+                            amount=active_qty,
                             price=float(tp_price_str),
                             params={'reduceOnly': True}
                         )
-                        new_tp_ids.append(tp_order["id"])
-                        tp_counter += 1
+                        new_tp_ids.append(tp_order['id'])
+                    else:
+                        accumulated_vol = 0.0
+                        tp_counter = 0
+                        for idx, (tp_price, _, _) in enumerate(tps[:4]):
+                            if idx in hit_tps:
+                                continue
+                                
+                            share = original_percentages[idx] / remaining_pct_sum
+                            current_tp_vol = float(async_ex.amount_to_precision(ccxt_futures_symbol, active_qty * share))
+                            
+                            if tp_counter == remaining_tps_count - 1:
+                                current_tp_vol = float(async_ex.amount_to_precision(
+                                    ccxt_futures_symbol, active_qty - accumulated_vol
+                                ))
+                            if current_tp_vol <= 0:
+                                continue
+                                
+                            accumulated_vol += current_tp_vol
+                            tp_price_str = async_ex.price_to_precision(ccxt_futures_symbol, tp_price)
+                            print(f"🎯 Відновлення TP{idx+1} (частка {share*100:.0f}%) на {current_tp_vol} за ціною {tp_price_str}")
+                            tp_order = await async_ex.create_order(
+                                ccxt_futures_symbol,
+                                type='limit',
+                                side=exit_side,
+                                amount=current_tp_vol,
+                                price=float(tp_price_str),
+                                params={'reduceOnly': True}
+                            )
+                            new_tp_ids.append(tp_order["id"])
+                            tp_counter += 1
                 
             # Оновлюємо стан ордерів у базі
             def update_startup_db_orders(db_id, actual_vol, sl_id, dobar_id, tp_ids, stop_loss_price):
@@ -1370,24 +1384,37 @@ async def monitor_signal(bot, signal, active_signals):
                         )
                         signal['stop_loss_id'] = new_sl_order["id"]
                         
-                        # 3. Виставляємо залишкові Take-Profit лімітки
-                        active_starting_volume = total_expected if dobar_filled_state else (total_expected * 0.5)
-                        tp_step_volume = float(async_ex.amount_to_precision(ccxt_futures_symbol, active_starting_volume / 4))
+# 3. Виставляємо залишкові Take-Profit лімітки (Пропорційний нелінійний розподіл)
+                        # Оскільки TP1 вже закрився (50% об'єму), залишковий об'єм на біржі становить 50%.
+                        # Нам потрібно перевиставити TP2 (20%), TP3 (15%), TP4 (15%).
+                        # Їхні частки в залишковій позиції: 40% (для TP2), 30% (для TP3), 30% (для TP4)
+                        original_percentages = [0.50, 0.20, 0.15, 0.15]
+                        remaining_pct_sum = sum(original_percentages[i] for i in range(4) if i not in hit_tps)
+                        if remaining_pct_sum <= 0:
+                            remaining_pct_sum = 0.25
+                            
                         new_tp_ids = []
+                        accumulated_vol = 0.0
+                        tp_counter = 0
+                        remaining_tps_count = 4 - len(hit_tps)
                         
                         for idx, (tp_price, _, _) in enumerate(tps[:4]):
                             if idx in hit_tps:
                                 continue # Пропускаємо вже взяті цілі
                                 
-                            current_tp_vol = tp_step_volume
-                            if idx == 3:
+                            share = original_percentages[idx] / remaining_pct_sum
+                            current_tp_vol = float(async_ex.amount_to_precision(ccxt_futures_symbol, active_starting_volume * share))
+                            
+                            if tp_counter == remaining_tps_count - 1:
                                 current_tp_vol = float(async_ex.amount_to_precision(
-                                    ccxt_futures_symbol, active_starting_volume - (tp_step_volume * 3)
+                                    ccxt_futures_symbol, active_starting_volume - accumulated_vol
                                 ))
                             if current_tp_vol <= 0:
                                 continue
                                 
+                            accumulated_vol += current_tp_vol
                             tp_price_str = async_ex.price_to_precision(ccxt_futures_symbol, tp_price)
+                            logger.info(f"🎯 Перевиставлення TP{idx+1} (частка {share*100:.0f}%) на {current_tp_vol} за ціною {tp_price_str}")
                             tp_order = await async_ex.create_order(
                                 symbol=ccxt_futures_symbol,
                                 type='limit',
@@ -1397,6 +1424,7 @@ async def monitor_signal(bot, signal, active_signals):
                                 params={'reduceOnly': True}
                             )
                             new_tp_ids.append(tp_order["id"])
+                            tp_counter += 1
                         
                         signal['tp_order_ids'] = new_tp_ids
                         
