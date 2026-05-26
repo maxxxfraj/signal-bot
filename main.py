@@ -1006,6 +1006,14 @@ async def monitor_signal(bot, signal, active_signals):
     while True:
         await asyncio.sleep(30)
 
+        # --- ЗАПОБІЖНИК САМОЗАВЕРШЕННЯ (Self-Termination Guard) ---
+        # Перевіряємо, чи цей сигнал досі є в активних (якщо видалено реконсиліатором — завершуємо таск)
+        is_alive = any(s['symbol'] == symbol and s['timeframe'] == signal['timeframe'] for s in active_signals)
+        if not is_alive:
+            print(f"🛑 [SELF-TERMINATION] Таск для {symbol} ({signal['timeframe']}) самозавершився, оскільки угоду видалено з активних.")
+            break
+        # -----------------------------------------------------------
+
         try:
             price = await get_price(ccxt_symbol)
         except Exception as e:
@@ -2420,8 +2428,18 @@ async def handle_updates(bot, active_signals):
 
                     elif data == 'clear_active_confirm':
                         clear_active_signals()
+                        
+                        # ПРИМУСОВО ВБИВАЄМО ВСІ АКТИВНІ ТАСКИ АСИНХРОННОСТІ (Запобігання зацикленню)
+                        for task_key, task in list(active_monitors.items()):
+                            if task and not task.done():
+                                task.cancel()
+                        active_monitors.clear()
                         active_signals.clear()
-                        await bot.send_message(chat_id=chat_id, text="✅ Всі активні сигнали закрито!")
+                        
+                        await bot.send_message(
+                            chat_id=chat_id, 
+                            text="✅ Всі активні сигнали закрито в базі, а їхні фонові таски успішно видалені з пам'яті!"
+                        )
 
                     elif data == 'clear_active_cancel':
                         await bot.send_message(chat_id=chat_id, text="❌ Скасовано")

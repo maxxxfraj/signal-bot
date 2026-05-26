@@ -5,3 +5,4 @@ __pycache__/
 *.log
 bot_data.db
 settings.json
+sync_configs.py

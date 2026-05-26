@@ -110,7 +110,6 @@ class ReconciliationWorker:
 
                 # Ситуація 1: Угода закрита на біржі, але локально активна
                 if not ex_pos:
-                    # ЗАХИСТ ВІРТУАЛЬНИХ СИГНАЛІВ: Очищуємо та закриваємо тільки якщо угода БУЛА фізично відкрита
                     has_real_orders = bool(signal.get('stop_loss_id')) or bool(signal.get('tp_order_ids'))
                     if has_real_orders:
                         logger.warning(f"🧹 Сигнал {symbol} закрився офлайн. Очищення...")
@@ -120,7 +119,14 @@ class ReconciliationWorker:
                             remove_active_signal(symbol, timeframe)
                             if signal in self.active_signals:
                                 self.active_signals.remove(signal)
-                            self.active_monitors.pop((symbol, timeframe), None)
+                            
+                            # ПРИМУСОВО СКАСОВУЄМО ТАСК МОНІТОРИНГУ (Запобігання таскам-фантомам)
+                            task_key = (symbol, timeframe)
+                            task = self.active_monitors.get(task_key)
+                            if task and not task.done():
+                                task.cancel()
+                                logger.info(f"🛑 [RECONCILER] Фоновий таск моніторингу для {symbol} {timeframe} успішно скасовано.")
+                            self.active_monitors.pop(task_key, None)
                             
                         await self.bot.send_message(
                             chat_id=self.chat_id,
@@ -131,7 +137,6 @@ class ReconciliationWorker:
                         )
                         continue
                     else:
-                        # Це чисто віртуальний (інформаційний) сигнал, ігноруємо відсутність позиції на біржі
                         continue
 
                 # Ситуація 2: Примирення об'ємів з урахуванням Dobar та тейків
@@ -139,52 +144,6 @@ class ReconciliationWorker:
                 actual_contracts = ex_pos['contracts']
                 hit_tps = set(signal.get('hit_tps', []))
                 dobar_filled_state = bool(signal.get('dobar_filled_state', False))
-
-                # === ОНОВЛЕННЯ: ФІЗИЧНЕ ПРЕД-ДЕТЕКТУВАННЯ ТЕЙКІВ ПЕРЕД ПЕРЕВІРКОЮ ОБ'ЄМІВ ===
-                if get_setting('trading_enabled') and signal.get('tp_order_ids'):
-                    new_detected_hits = set()
-                    for idx, tp_id in enumerate(signal['tp_order_ids']):
-                        if idx in hit_tps:
-                            continue
-                        try:
-                            order_info = await async_ex.fetch_order(tp_id, ccxt_futures_symbol)
-                            if order_info.get('status') == 'closed': # Ордер виконався на біржі!
-                                new_detected_hits.add(idx)
-                                logger.info(f"🎯 [RECONCILER] Виявлено виконання TP{idx+1} (ID: {tp_id}) для {symbol} під час фонового примирення.")
-                        except Exception:
-                            pass
-                            
-                    if new_detected_hits:
-                        hit_tps = hit_tps | new_detected_hits
-                        signal['hit_tps'] = hit_tps
-                        
-                        # Перевід в БУ при першому тейку (З динамічним розрахунком ціни)
-                        if 0 in hit_tps and signal.get('stop_loss') != signal['entry']:
-                            # РОЗРАХУНОК ДИНАМІЧНОГО БЕЗУБИТКУ ПРИ РЕКОНСИЛІАЦІЇ
-                            if dobar_filled_state:
-                                dobar_mid = (signal['dobar_low'] + signal['dobar_high']) / 2.0
-                                avg_entry = (signal['entry'] + dobar_mid) / 2.0
-                            else:
-                                avg_entry = signal['entry']
-                                
-                            signal['stop_loss'] = avg_entry
-                                
-                            # Оновлюємо стан в PostgreSQL
-                            hit_tps_str = ",".join(map(str, sorted(list(hit_tps))))
-                            conn = get_connection()
-                            try:
-                                cursor = conn.cursor()
-                                cursor.execute(
-                                    "UPDATE signals SET hit_tps = %s, stop_loss = %s WHERE id = %s",
-                                    (hit_tps_str, avg_entry, signal['db_id'])
-                                )
-                                conn.commit()
-                                cursor.close()
-                            except Exception as db_err:
-                                logger.error(f"Помилка оновлення hit_tps в БД під час реконсиліації: {db_err}")
-                            finally:
-                                conn.close()
-                # =========================================================================
 
                 # --- МАТЕМАТИЧНЕ КОРЕГУВАННЯ ОБ'ЄМУ DOBAR ТА ТЕЙКІВ ---
                 use_dobar_setting = get_setting('use_dobar')
@@ -207,27 +166,26 @@ class ReconciliationWorker:
                         f"Біржа: {actual_contracts}. Адаптація..."
                     )
                     
-                    # Перебудовуємо всю сітку
+                    # Перебудовуємо всю сітку ордерів
                     await self._rebuild_protective_orders(signal, actual_contracts, ccxt_futures_symbol, async_ex)
 
                     await self.bot.send_message(
                         chat_id=self.chat_id,
                         text=f"🔄 <b>Адаптація та повне відновлення сітки для #{symbol} ({timeframe})!</b>\n\n"
                              f"📊 Фактичний об'єм на біржі: <b>{actual_contracts}</b> (Очікувалось: {expected_on_exchange})\n"
-                             f"🛡️ <b>Результат:</b> Захисний Stop-Loss, лімітка Dobar та Take-Profits повністю перевиставлені під новий об'єм.",
+                             f"🛡️ <b>Результат:</b> Захисна сітка ордерів успішно перевиставлена під новий об'єм.",
                         parse_mode='HTML'
                     )
 
         except Exception as e:
             logger.error(f"Помилка під час примирення станів: {e}", exc_info=True)
         finally:
-            # При використанні Singleton-клієнта ми більше НЕ закриваємо сесію локально!
             pass
 
     async def _rebuild_protective_orders(self, signal: dict, actual_qty: float, ccxt_symbol: str, async_ex):
-        """Повністю та безпечно перевиставляє весь пакет ордерів під фактичний об'єм"""
+        """Перевиставляє весь пакет ордерів з ізольованою обробкою помилок (надійна версія)"""
         try:
-            # 1. Повністю очищуємо всі ордери ( Стандарті та Алгоритмічні )
+            # 1. Повністю очищуємо всі ордери
             await self.cancel_all_exchange_orders_for_symbol(async_ex, signal['symbol'].replace('/', ''), ccxt_symbol)
             await asyncio.sleep(1.5)
 
@@ -235,142 +193,137 @@ class ReconciliationWorker:
             entry_side = "buy" if direction == "LONG" else "sell"
             exit_side = "sell" if direction == "LONG" else "buy"
             
-            # --- ВІДНОВЛЕННЯ 1: STOP-LOSS (STOP_MARKET) З АВТО-ЛІКУВАННЯМ БУ ---
-            hit_tps = set(signal.get('hit_tps', []))
-            use_dobar_setting = get_setting('use_dobar') or True
-            dobar_filled_state = bool(signal.get('dobar_filled_state', False))
-            
-            if 0 in hit_tps:
-                # Динамічно та безпомилково перераховуємо БУ на випадок розбіжностей у БД
-                if dobar_filled_state:
-                    dobar_mid = (signal['dobar_low'] + signal['dobar_high']) / 2.0
-                    correct_sl = (signal['entry'] + dobar_mid) / 2.0
-                else:
-                    correct_sl = signal['entry']
-                    
-                sl_price = correct_sl
-                signal['stop_loss'] = correct_sl
-                logger.info(f"🩹 [HEALING] Реконсиліатор виявив та вилікував БУ-стоп для {signal['symbol']} на рівень {correct_sl}")
-            else:
-                sl_price = signal.get('stop_loss')
-                
+            # --- ВІДНОВЛЕННЯ 1: STOP-LOSS (STOP_MARKET) - АБСОЛЮТНО ІЗОЛЬОВАНО ---
+            sl_price = signal.get('stop_loss')
             new_sl_id = None
             if sl_price:
-                sl_price_str = async_ex.price_to_precision(ccxt_symbol, sl_price)
-                sl_params = {
-                    'stopPrice': float(sl_price_str),
-                    'reduceOnly': True
-                }
-                new_sl_order = await async_ex.create_order(
-                    symbol=ccxt_symbol,
-                    type='STOP_MARKET',
-                    side=exit_side,
-                    amount=actual_qty,
-                    params=sl_params
-                )
-                new_sl_id = new_sl_order['id']
-
-            # --- ВІДНОВЛЕННЯ 2: DOBAR LIMIT ORDER (З УРАХУВАННЯМ DOBAR-CANCEL RULE) ---
-            new_dobar_id = signal.get('dobar_order_id')
-            
-            # Відновлюємо Dobar лімітку ТІЛЬКИ якщо TP1 ще не був досягнутий! (Правило Dobar-Cancel)
-            if use_dobar_setting and not dobar_filled_state and (0 not in hit_tps):
-                dobar_low = signal.get('dobar_low')
-                dobar_high = signal.get('dobar_high')
-                if dobar_low is not None and dobar_high is not None:
-                    dobar_mid = (dobar_low + dobar_high) / 2.0
-                    dobar_price_str = async_ex.price_to_precision(ccxt_symbol, dobar_mid)
-                    
-                    logger.info(f"⏳ Перевиставлення лімітки Dobar на {actual_qty} за ціною {dobar_price_str}")
-                    dobar_order = await async_ex.create_order(
+                try:
+                    sl_price_str = async_ex.price_to_precision(ccxt_symbol, sl_price)
+                    sl_params = {
+                        'stopPrice': float(sl_price_str),
+                        'reduceOnly': True
+                    }
+                    new_sl_order = await async_ex.create_order(
                         symbol=ccxt_symbol,
-                        type='limit',
-                        side=entry_side,
+                        type='STOP_MARKET',
+                        side=exit_side,
                         amount=actual_qty,
-                        price=float(dobar_price_str)
+                        params=sl_params
                     )
-                    new_dobar_id = dobar_order['id']
+                    new_sl_id = new_sl_order['id']
+                    logger.info(f"🛡️ [REBUILD] Stop-Loss успішно відновлено на {actual_qty} для {ccxt_symbol}")
+                except Exception as sl_err:
+                    logger.critical(f"❌ [CRITICAL] Не вдалося перевстановити Stop-Loss для {ccxt_symbol}: {sl_err}")
+                    # Обов'язкове екстрене сповіщення
+                    await self.bot.send_message(
+                        chat_id=self.chat_id,
+                        text=f"⚠️ <b>[КРИТИЧНО] Не вдалося виставити Stop-Loss для #{signal['symbol']}!</b>\n"
+                             f"Помилка біржі: <i>{sl_err}</i>\n"
+                             f"🚨 Позиція незахищена! Перевірте кабінет вручну.",
+                        parse_mode='HTML'
+                    )
+
+            # --- ВІДНОВЛЕННЯ 2: DOBAR LIMIT ORDER (ІЗОЛЬОВАНО) ---
+            use_dobar_setting = get_setting('use_dobar')
+            if use_dobar_setting is None:
+                use_dobar_setting = True
+                
+            dobar_filled_state = bool(signal.get('dobar_filled_state', False))
+            new_dobar_id = signal.get('dobar_order_id')
+            hit_tps = set(signal.get('hit_tps', []))
+            
+            if use_dobar_setting and not dobar_filled_state and (0 not in hit_tps):
+                try:
+                    dobar_low = signal.get('dobar_low')
+                    dobar_high = signal.get('dobar_high')
+                    if dobar_low is not None and dobar_high is not None:
+                        dobar_mid = (dobar_low + dobar_high) / 2.0
+                        dobar_price_str = async_ex.price_to_precision(ccxt_symbol, dobar_mid)
+                        
+                        logger.info(f"⏳ Перевиставлення лімітки Dobar на {actual_qty} за ціною {dobar_price_str}")
+                        dobar_order = await async_ex.create_order(
+                            symbol=ccxt_symbol,
+                            type='limit',
+                            side=entry_side,
+                            amount=actual_qty,
+                            price=float(dobar_price_str)
+                        )
+                        new_dobar_id = dobar_order['id']
+                except Exception as dobar_err:
+                    logger.warning(f"⚠️ Не вдалося перевстановити Dobar лімітку для {ccxt_symbol}: {dobar_err}")
             else:
-                # Якщо хоча б один тейк взято — добір більше ніколи не виставляється на біржу
                 new_dobar_id = None
 
-            # --- ВІДНОВЛЕННЯ 3: TAKE-PROFIT LIMIT ORDERS ---
+            # --- ВІДНОВЛЕННЯ 3: TAKE-PROFIT LIMIT ORDERS (ІЗОЛЬОВАНО) ---
             new_tp_ids = []
             tps = signal.get('tps', [])
             
             remaining_tps_count = 4 - len(hit_tps)
             if remaining_tps_count > 0:
-                # Визначаємо ліміти лотності на біржі
-                market = async_ex.market(ccxt_symbol)
-                min_qty = market['limits']['amount']['min'] or 1.0
-                
-                # Отримуємо найближчу невідкриту ціль тейку
-                next_tp_price = tps[3][0]
-                for idx, (tp_price, _, _) in enumerate(tps[:4]):
-                    if idx not in hit_tps:
-                        next_tp_price = tp_price
-                        break
-                        
-                # Оцінюємо плановий об'єм та номінал кроку
-                planned_step_volume = actual_qty / remaining_tps_count
-                estimated_step_notional = planned_step_volume * next_tp_price
-                
-                # Запобігання помилкам лотності та номіналу (Lot & Notional Guard)
-                if planned_step_volume < min_qty or estimated_step_notional < 5.1:
-                    logger.info(f"⚠️ [LOT/NOTIONAL GUARD] Крок ({planned_step_volume} / {estimated_step_notional:.2f} USD) нижче лімітів. Об'єднуємо тейки в один.")
-                    tp_price_str = async_ex.price_to_precision(ccxt_symbol, next_tp_price)
-                    tp_order = await async_ex.create_order(
-                        symbol=ccxt_symbol,
-                        type='limit',
-                        side=exit_side,
-                        amount=actual_qty,
-                        price=float(tp_price_str),
-                        params={'reduceOnly': True}
-                    )
-                    new_tp_ids.append(tp_order['id'])
-                else:
-                    # Стандартна розділена сітка
-                    tp_step_volume = float(async_ex.amount_to_precision(ccxt_symbol, planned_step_volume))
-                    tp_counter = 0
+                try:
+                    market = async_ex.market(ccxt_symbol)
+                    min_qty = market['limits']['amount']['min'] or 1.0
+                    
+                    next_tp_price = tps[3][0]
                     for idx, (tp_price, _, _) in enumerate(tps[:4]):
-                        if idx in hit_tps:
-                            continue
+                        if idx not in hit_tps:
+                            next_tp_price = tp_price
+                            break
                             
-                        current_tp_vol = tp_step_volume
-                        if tp_counter == remaining_tps_count - 1:
-                            current_tp_vol = float(async_ex.amount_to_precision(
-                                ccxt_symbol, actual_qty - (tp_step_volume * (remaining_tps_count - 1))
-                            ))
-                            
-                        if current_tp_vol <= 0:
-                            continue
-                            
-                        tp_price_str = async_ex.price_to_precision(ccxt_symbol, tp_price)
-                        logger.info(f"🎯 Перевиставлення TP{idx+1} на {current_tp_vol} за ціною {tp_price_str}")
-                        
+                    planned_step_volume = actual_qty / remaining_tps_count
+                    estimated_step_notional = planned_step_volume * next_tp_price
+                    
+                    if planned_step_volume < min_qty or estimated_step_notional < 5.1:
+                        logger.info(f"⚠️ [LOT/NOTIONAL GUARD] Об'єднуємо тейки в один для {ccxt_symbol}.")
+                        tp_price_str = async_ex.price_to_precision(ccxt_symbol, next_tp_price)
                         tp_order = await async_ex.create_order(
                             symbol=ccxt_symbol,
                             type='limit',
                             side=exit_side,
-                            amount=current_tp_vol,
+                            amount=actual_qty,
                             price=float(tp_price_str),
                             params={'reduceOnly': True}
                         )
                         new_tp_ids.append(tp_order['id'])
-                        tp_counter += 1
+                    else:
+                        tp_step_volume = float(async_ex.amount_to_precision(ccxt_symbol, planned_step_volume))
+                        tp_counter = 0
+                        for idx, (tp_price, _, _) in enumerate(tps[:4]):
+                            if idx in hit_tps:
+                                continue
+                                
+                            current_tp_vol = tp_step_volume
+                            if tp_counter == remaining_tps_count - 1:
+                                current_tp_vol = float(async_ex.amount_to_precision(
+                                    ccxt_symbol, actual_qty - (tp_step_volume * (remaining_tps_count - 1))
+                                ))
+                                
+                            if current_tp_vol <= 0:
+                                continue
+                                
+                            tp_price_str = async_ex.price_to_precision(ccxt_symbol, tp_price)
+                            tp_order = await async_ex.create_order(
+                                symbol=ccxt_symbol,
+                                type='limit',
+                                side=exit_side,
+                                amount=current_tp_vol,
+                                price=float(tp_price_str),
+                                params={'reduceOnly': True}
+                            )
+                            new_tp_ids.append(tp_order['id'])
+                            tp_counter += 1
+                except Exception as tp_err:
+                    logger.warning(f"⚠️ Не вдалося перевстановити Take-Profits для {ccxt_symbol}: {tp_err}")
 
-            # Визначаємо коефіцієнт залишкових тейків для збереження пропорцій у БД
             remaining_factor = 1.0 - (0.25 * len(hit_tps))
             if remaining_factor <= 0:
                 remaining_factor = 0.25
 
-            # Розрахунок відновленого масштабованого об'єму для запису в БД
             if use_dobar_setting and not dobar_filled_state:
                 db_qty_val = (actual_qty / remaining_factor) * 2.0
             else:
                 db_qty_val = actual_qty / remaining_factor
 
-            # 4. Записуємо оновлені ID ордерів та ВИПРАВЛЕНУ ціну стопу у PostgreSQL
             self._update_db_orders_state(
                 db_id=signal['db_id'],
                 actual_qty=db_qty_val,
@@ -378,20 +331,18 @@ class ReconciliationWorker:
                 new_dobar_id=new_dobar_id,
                 new_tp_ids=new_tp_ids,
                 dobar_filled=dobar_filled_state,
-                stop_loss_price=sl_price  # Записуємо вилікувану БУ-ціну в базу
+                stop_loss_price=sl_price
             )
             
-            # 5. Оновлюємо in-memory копію сигналу в оперативній пам'яті
             signal['pos_contracts'] = db_qty_val
             signal['stop_loss_id'] = new_sl_id
             signal['dobar_order_id'] = new_dobar_id
             signal['tp_order_ids'] = new_tp_ids
 
         except Exception as e:
-            logger.error(f"❌ Помилка повної перебудови захисної сітки для {ccxt_symbol}: {e}")
+            logger.error(f"❌ Критична помилка перебудови сітки для {ccxt_symbol}: {e}")
 
     def _update_db_orders_state(self, db_id: int, actual_qty: float, new_sl_id: str, new_dobar_id: str, new_tp_ids: list, dobar_filled: bool, stop_loss_price: float):
-        """Оновлює стан всіх ордерів та ціну стопу у PostgreSQL після повної перебудови сітки"""
         if not db_id:
             return
         conn = get_connection()

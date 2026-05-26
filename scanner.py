@@ -8,13 +8,10 @@ import asyncio
 from backtest import run_backtest
 from settings import get_setting, get_exchange_client, to_native_float, to_native_int
 from regime_classifier import MarketRegimeClassifier
+from database import load_strategy_config_from_db
 
 # Ініціалізація динамічного асинхронного клієнта біржі (Binance або MEXC)
 exchange = get_exchange_client(async_mode=True)
-
-CONFIG_FILE = 'strategy_config.json'
-_config_cache = {}
-_config_mtime = 0
 
 _load_markets_lock = asyncio.Lock()
 
@@ -31,37 +28,22 @@ SAFE_DEFAULTS = {
     },
 }
 
-
-def load_strategy_config():
-    global _config_cache, _config_mtime
-    try:
-        if not os.path.exists(CONFIG_FILE):
-            return {}
-        mtime = os.path.getmtime(CONFIG_FILE)
-        if mtime != _config_mtime:
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                _config_cache = json.load(f)
-            _config_mtime = mtime
-            print(f"🔄 Конфіг стратегій оновлено")
-        return _config_cache
-    except Exception as e:
-        print(f"⚠️ Помилка читання конфігу: {e} — використовую defaults")
-        return {}
-
-
 def get_params(symbol, timeframe, direction):
-    config = load_strategy_config()
     symbol_clean = symbol.replace('/', '')
-    try:
-        params = config[symbol_clean][timeframe][direction]
+    
+    # Завантажуємо параметри безпосередньо з хмари Neon PostgreSQL
+    db_params = load_strategy_config_from_db(symbol_clean, timeframe, direction)
+    
+    if db_params:
         return (
-            params['ema_fast'],
-            params['ema_slow'],
-            params['rsi_min'],
-            params['rsi_max'],
-            params.get('strategy_type', 'ema_rsi'),
+            db_params['ema_fast'],
+            db_params['ema_slow'],
+            db_params['rsi_min'],
+            db_params['rsi_max'],
+            db_params['strategy_type']
         )
-    except (KeyError, TypeError):
+    else:
+        # Фолбек на безпечні значення за замовчуванням, якщо монета ще не була оптимізована
         d = SAFE_DEFAULTS[direction]
         return d['ema_fast'], d['ema_slow'], d['rsi_min'], d['rsi_max'], d['strategy_type']
 

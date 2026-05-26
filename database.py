@@ -95,6 +95,23 @@ def init_db():
         )
     ''')
 
+    # Створюємо таблицю конфігурації стратегій (Persistent Strategy Parameters)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS strategy_configs (
+            symbol VARCHAR(20) NOT NULL,
+            timeframe VARCHAR(10) NOT NULL,
+            direction VARCHAR(10) NOT NULL,
+            ema_fast INTEGER NOT NULL,
+            ema_slow INTEGER NOT NULL,
+            rsi_min INTEGER NOT NULL,
+            rsi_max INTEGER NOT NULL,
+            score REAL NOT NULL,
+            strategy_type VARCHAR(30) NOT NULL,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (symbol, timeframe, direction)
+        )
+    ''')
+
     # Створюємо таблицю аналітики виконання угод (Slippage & Latency Tracking)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS order_executions (
@@ -802,5 +819,50 @@ def get_execution_analytics_summary():
     except Exception as e:
         print(f"Помилка розрахунку аналітики виконання: {e}")
         return "❌ Помилка розрахунку аналітики"
+    finally:
+        conn.close()
+
+def save_strategy_config_to_db(symbol, timeframe, direction, ema_fast, ema_slow, rsi_min, rsi_max, score, strategy_type):
+    """Зберігає або оновлює оптимізовані параметри у PostgreSQL Neon"""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO strategy_configs (symbol, timeframe, direction, ema_fast, ema_slow, rsi_min, rsi_max, score, strategy_type, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (symbol, timeframe, direction) DO UPDATE SET
+                ema_fast = EXCLUDED.ema_fast,
+                ema_slow = EXCLUDED.ema_slow,
+                rsi_min = EXCLUDED.rsi_min,
+                rsi_max = EXCLUDED.rsi_max,
+                score = EXCLUDED.score,
+                strategy_type = EXCLUDED.strategy_type,
+                updated_at = NOW()
+        ''', (symbol, timeframe, direction, ema_fast, ema_slow, rsi_min, rsi_max, score, strategy_type))
+        conn.commit()
+        cursor.close()
+        print(f"💾 [DB CONFIG] Параметри для {symbol} ({timeframe} {direction}) успішно збережено в Neon.")
+    except Exception as e:
+        print(f"Помилка збереження конфігурації стратегії в БД: {e}")
+    finally:
+        conn.close()
+
+
+def load_strategy_config_from_db(symbol, timeframe, direction):
+    """Завантажує параметри стратегії безпосередньо з бази даних"""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute('''
+            SELECT ema_fast, ema_slow, rsi_min, rsi_max, strategy_type 
+            FROM strategy_configs 
+            WHERE symbol = %s AND timeframe = %s AND direction = %s
+        ''', (symbol, timeframe, direction))
+        row = cursor.fetchone()
+        cursor.close()
+        return row
+    except Exception as e:
+        print(f"Помилка завантаження конфігурації стратегії з БД: {e}")
+        return None
     finally:
         conn.close()
