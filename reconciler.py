@@ -1,3 +1,4 @@
+# reconciler.py
 import asyncio
 import logging
 from database import remove_active_signal, get_connection
@@ -78,25 +79,29 @@ class ReconciliationWorker:
                     if ex_symbol_clean not in local_symbols:
                         logger.critical(f"🚨 [PHANTOM] Виявлено неконтрольовану позицію по {ex_symbol_clean}! Аварійне закриття...")
                         
-                        await self.cancel_all_exchange_orders_for_symbol(async_ex, ex_symbol_clean, ex_data['symbol_ccxt'])
-                        await asyncio.sleep(1.0)
-                        
-                        close_side = "sell" if ex_data['side'] == "LONG" else "buy"
-                        await async_ex.create_order(
-                            symbol=ex_data['symbol_ccxt'],
-                            type='market',
-                            side=close_side,
-                            amount=ex_data['contracts'],
-                            params={'reduceOnly': True}
-                        )
-                        
-                        await self.bot.send_message(
-                            chat_id=self.chat_id,
-                            text=f"🚨 <b>[КРИТИЧНО] Виявлено ФАНТОМНУ позицію по #{ex_symbol_clean}!</b>\n\n"
-                                 f"📦 Об'єм: <b>{ex_data['contracts']} contracts</b> ({ex_data['side']})\n"
-                                 f"🔥 <b>Дія:</b> Позицію екстрено ліквідовано по ринку, а залишкові ордери скасовані.",
-                            parse_mode='HTML'
-                        )
+                        # ІЗОЛЮЄМО ЗАКРИТТЯ ФАНТОМА, ЩОБ ПОМИЛКИ НЕПІДТРИМУВАНИХ МОНЕТ BINANCE DEMO НЕ ЗУПИНЯЛИ РЕКОНСИЛІАТОР
+                        try:
+                            await self.cancel_all_exchange_orders_for_symbol(async_ex, ex_symbol_clean, ex_data['symbol_ccxt'])
+                            await asyncio.sleep(1.0)
+                            
+                            close_side = "sell" if ex_data['side'] == "LONG" else "buy"
+                            await async_ex.create_order(
+                                symbol=ex_data['symbol_ccxt'],
+                                type='market',
+                                side=close_side,
+                                amount=ex_data['contracts'],
+                                params={'reduceOnly': True}
+                            )
+                        except Exception as phantom_err:
+                            logger.error(f"⚠️ Не вдалося автоматично закрити фантомну позицію {ex_symbol_clean}: {phantom_err}")
+                            # Відправляємо м'яке попередження в Telegram замість падіння процесу
+                            await self.bot.send_message(
+                                chat_id=self.chat_id,
+                                text=f"⚠️ <b>[ФАНТОМ] Виявлено позицію по #{ex_symbol_clean}, але автоматичне закриття не вдалося!</b>\n\n"
+                                     f"Причина: <i>{phantom_err}</i>\n"
+                                     f"💡 <i>Це може бути через те, що цей актив не підтримується у Демо-режимі Binance, або обмежений вашим акаунтом.</i>",
+                                parse_mode='HTML'
+                            )
 
             # --- ЕТАП Б: Примирення локальних сигналів ---
             for signal in local_signals_snapshot:
@@ -109,6 +114,7 @@ class ReconciliationWorker:
 
                 # Ситуація 1: Угода закрита на біржі, але локально активна
                 if not ex_pos:
+                    # ЗАХИСТ ВІРТУАЛЬНИХ СИГНАЛІВ: Очищуємо та закриваємо тільки якщо угода БУЛА фізично відкрита
                     has_real_orders = bool(signal.get('stop_loss_id')) or bool(signal.get('tp_order_ids'))
                     if has_real_orders:
                         logger.warning(f"🧹 Сигнал {symbol} закрився офлайн. Очищення...")
@@ -118,14 +124,7 @@ class ReconciliationWorker:
                             remove_active_signal(symbol, timeframe)
                             if signal in self.active_signals:
                                 self.active_signals.remove(signal)
-                            
-                            # ПРИМУСОВО СКАСОВУЄМО ТАСК МОНІТОРИНГУ (Запобігання таскам-фантомам)
-                            task_key = (symbol, timeframe)
-                            task = self.active_monitors.get(task_key)
-                            if task and not task.done():
-                                task.cancel()
-                                logger.info(f"🛑 [RECONCILER] Фоновий таск моніторингу для {symbol} {timeframe} успішно скасовано.")
-                            self.active_monitors.pop(task_key, None)
+                            self.active_monitors.pop((symbol, timeframe), None)
                             
                         await self.bot.send_message(
                             chat_id=self.chat_id,
@@ -136,6 +135,7 @@ class ReconciliationWorker:
                         )
                         continue
                     else:
+                        # Це чисто віртуальний (інформаційний) сигнал, ігноруємо відсутність позиції на біржі
                         continue
 
                 # Ситуація 2: Примирення об'ємів з урахуванням Dobar та тейків
@@ -152,7 +152,7 @@ class ReconciliationWorker:
                             continue
                         try:
                             order_info = await async_ex.fetch_order(tp_id, ccxt_futures_symbol)
-                            if order_info.get('status') == 'closed': # Ордер виконався на біржі!
+                            if order_info.get('status') == 'closed': #  Ордер виконався на біржі!
                                 new_detected_hits.add(idx)
                                 logger.info(f"🎯 [RECONCILER] Виявлено виконання TP{idx+1} (ID: {tp_id}) для {symbol} під час фонового примирення.")
                         except Exception:
@@ -164,7 +164,7 @@ class ReconciliationWorker:
                         
                         # Перевід в БУ при першому тейку (З динамічним розрахунком ціни)
                         if 0 in hit_tps and signal.get('stop_loss') != signal['entry']:
-                            # РОЗРАХУНОК ДИНАМІЧНОГО БЕЗУБИТКУ ПРИ РЕКОНСИЛІАЦІЇ
+                            #  РОЗРАХУНОК ДИНАМІЧНОГО БЕЗУБИТКУ ПРИ РЕКОНСИЛІАЦІЇ
                             if dobar_filled_state:
                                 dobar_mid = (signal['dobar_low'] + signal['dobar_high']) / 2.0
                                 avg_entry = (signal['entry'] + dobar_mid) / 2.0
@@ -190,7 +190,7 @@ class ReconciliationWorker:
                                 conn.close()
                 # =========================================================================
 
-                # --- МАТЕМАТИЧНЕ КОРЕГУВАННЯ ОБ'ЄМУ DOBAR ТА ТЕЙКІВ (Нелінійний 50/20/15/15) ---
+                # --- МАТЕМАТИЧНЕ КОРЕГУВАННЯ ОБ'ЄМУ DOBAR ТА ТЕЙКІВ ---
                 use_dobar_setting = get_setting('use_dobar')
                 if use_dobar_setting is None:
                     use_dobar_setting = True
@@ -216,7 +216,7 @@ class ReconciliationWorker:
                         f"Біржа: {actual_contracts}. Адаптація..."
                     )
                     
-                    # Перебудовуємо всю сітку ордерів
+                    # Перебудовуємо всю сітку
                     await self._rebuild_protective_orders(signal, actual_contracts, ccxt_futures_symbol, async_ex)
 
                     await self.bot.send_message(
@@ -315,7 +315,7 @@ class ReconciliationWorker:
             else:
                 new_dobar_id = None
 
-            # --- ВІДНОВЛЕННЯ 3: TAKE-PROFIT LIMIT ORDERS (З НЕЛІНІЙНИМ РОЗПОДІЛОМ 50/20/15/15) ---
+            # --- ВІДНОВЛЕННЯ 3: TAKE-PROFIT LIMIT ORDERS ---
             new_tp_ids = []
             tps = signal.get('tps', [])
             
@@ -363,8 +363,8 @@ class ReconciliationWorker:
                         )
                         new_tp_ids.append(tp_order['id'])
                     else:
-                        # Розподіляємо фактичний об'єм пропорційно оригінальним часткам
-                        accumulated_vol = 0.0
+                        #  Стандартна розділена сітка
+                        tp_step_volume = float(async_ex.amount_to_precision(ccxt_symbol, planned_step_volume))
                         tp_counter = 0
                         for idx, (tp_price, _, _) in enumerate(tps[:4]):
                             if idx in hit_tps:

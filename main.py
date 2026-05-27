@@ -443,8 +443,10 @@ async def get_auth_exchange_client():
             'aiohttp_trust_env': False
         })
         if testnet_mode:
+            # Виправлено для сумісності з MEXC
             client.set_sandbox_mode(True)
             
+    # ФІНАЛЬНИЙ БЛОК ІНІЦІАЛІЗАЦІЇ (Обов'язковий)
     try:
         await client.load_markets()
     except Exception as e:
@@ -453,7 +455,6 @@ async def get_auth_exchange_client():
         
     async_exchange = client
     return async_exchange
-
 
 # ─────────────────────────────────────────────
 # УНІФІКОВАНИЙ ХЕЛПЕР РЕЗОЛВУ СИМВОЛУ Ф'ЮЧЕРСІВ CCXT
@@ -1896,8 +1897,10 @@ async def scheduled_report_loop(bot):
         except Exception as e:
             print(f"Помилка автоматичної розсилки звітів: {e}")
 
+# main.py
+
 async def handle_updates(bot, active_signals):
-    global active_timeframe, exchange, global_executor
+    global active_timeframe, exchange, global_executor, active_monitors, async_exchange
     offset = None
 
     while True:
@@ -1906,6 +1909,7 @@ async def handle_updates(bot, active_signals):
             for update in updates:
                 offset = update.update_id + 1
 
+                # 1. ОБРОБКА ТЕКСТОВИХ ПОВІДОМЛЕНЬ ТА КНОПОК МЕНЮ
                 if update.message and update.message.text:
                     text = update.message.text
                     chat_id = update.message.chat.id
@@ -1918,7 +1922,7 @@ async def handle_updates(bot, active_signals):
                     if text == '/start':
                         await bot.send_message(
                             chat_id=chat_id,
-                            text="🤖 <b>Сигнальний бот успішно запущено!</b>\nВітаємо.",
+                            text="🤖 <b>Сигнальний бот успішно запущено!</b>\nВикористовуйте зручне меню кнопок внизу екрана для керування.",
                             reply_markup=main_reply_keyboard(),
                             parse_mode='HTML'
                         )
@@ -1928,7 +1932,6 @@ async def handle_updates(bot, active_signals):
                         await bot.send_message(chat_id=chat_id, text=summary, parse_mode='HTML')
 
                     elif text == '📈  Аналітика виконання':
-                        # Надсилаємо наш новий аналітичний дашборд
                         from database import get_execution_analytics_summary
                         report = get_execution_analytics_summary()
                         await bot.send_message(chat_id=chat_id, text=report, parse_mode='HTML')
@@ -1967,9 +1970,72 @@ async def handle_updates(bot, active_signals):
 
                     elif text == '⏳ Активні сигнали' or text == '/active':
                         if not active_signals:
-                            msg = "⏳ Активних сигналів немає"
-                        else:
-                            lines = ["⏳ Активні сигнали:\n"]
+                            await bot.send_message(chat_id=chat_id, text="⏳ Активних сигналів немає")
+                            continue
+                            
+                        await bot.send_message(chat_id=chat_id, text="⏳ Зчитую реальний стан позицій та PnL з біржі...")
+                        
+                        async_ex = None
+                        try:
+                            # Використовуємо наш Singleton-клієнт
+                            async_ex = await get_auth_exchange_client()
+                            
+                            # Завантажуємо реальні відкриті позиції з біржі
+                            positions_data = await async_ex.fetch_positions()
+                            exchange_positions = {}
+                            for pos in positions_data:
+                                contracts = abs(float(pos.get('contracts', 0.0)))
+                                if contracts > 0:
+                                    symbol_clean = pos.get('symbol', '').replace('/', '').split(':')[0]
+                                    exchange_positions[symbol_clean] = {
+                                        'contracts': contracts,
+                                        'entryPrice': float(pos.get('entryPrice', 0.0)),
+                                        'currentPrice': float(pos.get('markPrice', 0.0)),
+                                        'unrealizedPnl': float(pos.get('unrealizedPnl', 0.0)),
+                                        'side': pos.get('side', '').upper(),
+                                        'percentage': float(pos.get('percentage', 0.0)) # % прибутку від CCXT
+                                    }
+                            
+                            lines = ["⏳ <b>АКТИВНІ СИГНАЛИ ТА РЕАЛЬНИЙ PnL З БІРЖІ:</b>\n"]
+                            for s in active_signals:
+                                symbol = s['symbol']
+                                symbol_clean = symbol.replace('/', '')
+                                timeframe = s['timeframe']
+                                direction = s['direction']
+                                entry = s['entry']
+                                tier = s.get('tier', '🟢')
+                                
+                                ex_pos = exchange_positions.get(symbol_clean)
+                                if ex_pos:
+                                    pnl_usd = ex_pos['unrealizedPnl']
+                                    pnl_pct = ex_pos['percentage']
+                                    cur_price = ex_pos['currentPrice']
+                                    
+                                    # Колір та емодзі для відображення PnL
+                                    pnl_emoji = "🟢" if pnl_usd >= 0 else "🔴"
+                                    sign = "+" if pnl_usd >= 0 else ""
+                                    
+                                    lines.append(
+                                        f"{tier} <b>#{symbol_clean}</b> ({timeframe}) | <b>{direction}</b>\n"
+                                        f"  💵 Вхід (БД): <b>{entry}</b> | Біржа: <b>{ex_pos['entryPrice']:.4f}</b>\n"
+                                        f"  📈 Поточна ціна: <b>{cur_price:.4f}</b> | Об'єм: <b>{ex_pos['contracts']} {symbol_clean[:-4]}</b>\n"
+                                        f"  {pnl_emoji} <b>PnL: {sign}${pnl_usd:.2f} ({sign}{pnl_pct:.2f}%)</b>\n"
+                                    )
+                                else:
+                                    # Трейд є в пам'яті бота, але на біржі позиції немає (чистий інформаційний режим)
+                                    lines.append(
+                                        f"{tier} <b>#{symbol_clean}</b> ({timeframe}) | <b>{direction}</b>\n"
+                                        f"  💵 Вхід (БД): <b>{entry}</b>\n"
+                                        f"  ℹ️ <i>Віртуальний моніторинг (немає активної позиції на біржі)</i>\n"
+                                    )
+                            
+                            msg = "\n".join(lines)
+                            await bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
+                            
+                        except Exception as e:
+                            print(f"Помилка отримання PnL для активних сигналів: {e}")
+                            # Безпечний фолбек на простий текст у разі тимчасових збоїв з'єднання
+                            lines = ["⏳ <b>Активні сигнали (Помилка запиту PnL):</b>\n"]
                             for s in active_signals:
                                 lines.append(
                                     f"{s.get('tier','🟢')} #{s['symbol']} "
@@ -1977,7 +2043,7 @@ async def handle_updates(bot, active_signals):
                                     f"Entry: {s['entry']}"
                                 )
                             msg = "\n".join(lines)
-                        await bot.send_message(chat_id=chat_id, text=msg)
+                            await bot.send_message(chat_id=chat_id, text=msg)
 
                     elif text == '⚙️ Налаштування' or text == '/settings':
                         await bot.send_message(
@@ -2003,6 +2069,7 @@ async def handle_updates(bot, active_signals):
                         )
                         await bot.send_message(chat_id=chat_id, text=msg)
 
+                # 2. ОБРОБКА CALLBACK QUERY (КНОПКИ НА ПОВІДОМЛЕННЯХ)
                 if update.callback_query:
                     query = update.callback_query
                     chat_id = query.message.chat.id
@@ -2041,43 +2108,42 @@ async def handle_updates(bot, active_signals):
                         await bot.send_message(chat_id=chat_id, text=msg)
 
                     elif data == 'cfg_scan_now':
-                            if is_scanning:
-                                await bot.send_message(
-                                    chat_id=chat_id, 
-                                    text="⏳ Сканування вже виконується іншим процесом. Будь ласка, зачекайте..."
-                                )
-                                continue
-                            
+                        if is_scanning:
                             await bot.send_message(
                                 chat_id=chat_id, 
-                                text="🔍 Запущено позачергове ручне сканування для всіх активних таймфреймів..."
+                                text="⏳ Сканування вже виконується іншим процесом. Будь ласка, зачекайте..."
                             )
-                            
-                            scan_logs = []
-                            active_tfs = get_setting('active_timeframes')
-                            success = await scan_and_send(bot, active_signals, active_tfs, scan_logs=scan_logs)
-                            
-                            if success:
-                                if scan_logs:
-                                    # БЕЗПЕЧНЕ ЕКРАНУВАННЯ ДЛЯ ЗАПОБІГАННЯ ПОМИЛЦІ PARSING ENTITIES
-                                    import html
-                                    escaped_logs = [html.escape(line) for line in scan_logs]
-                                    log_text = "\n".join(escaped_logs)
-                                    
-                                    if len(log_text) > 3900:
-                                        log_text = log_text[:3800] + "\n\n⚠️ <i>(Лог обрізано через ліміт повідомлення Telegram)</i>"
-                                    
-                                    await bot.send_message(
-                                        chat_id=chat_id,
-                                        text=f"📋 <b>Результати сканування:</b>\n\n{log_text}\n\n✅ <b>Ручне сканування успішно завершено!</b>",
-                                        parse_mode='HTML'
-                                    )
-                                else:
-                                    await bot.send_message(
-                                        chat_id=chat_id, 
-                                        text="✅ <b>Ручне сканування успішно завершено! Нових сигналів не знайдено.</b>", 
-                                        parse_mode='HTML'
-                                    )
+                            continue
+                        
+                        await bot.send_message(
+                            chat_id=chat_id, 
+                            text="🔍 Запущено позачергове ручне сканування для всіх активних таймфреймів..."
+                        )
+                        
+                        scan_logs = []
+                        active_tfs = get_setting('active_timeframes')
+                        success = await scan_and_send(bot, active_signals, active_tfs, scan_logs=scan_logs)
+                        
+                        if success:
+                            if scan_logs:
+                                import html
+                                escaped_logs = [html.escape(line) for line in scan_logs]
+                                log_text = "\n".join(escaped_logs)
+                                
+                                if len(log_text) > 3900:
+                                    log_text = log_text[:3800] + "\n\n⚠️ <i>(Лог обрізано через ліміт повідомлення Telegram)</i>"
+                                
+                                await bot.send_message(
+                                    chat_id=chat_id,
+                                    text=f"📋 <b>Результати сканування:</b>\n\n{log_text}\n\n✅ <b>Ручне сканування успішно завершено!</b>",
+                                    parse_mode='HTML'
+                                )
+                            else:
+                                await bot.send_message(
+                                    chat_id=chat_id, 
+                                    text="✅ <b>Ручне сканування успішно завершено! Нових сигналів не знайдено.</b>", 
+                                    parse_mode='HTML'
+                                )
 
                     elif data == 'info':
                         htf = get_setting('htf_bias_enabled')
@@ -2109,7 +2175,7 @@ async def handle_updates(bot, active_signals):
                         print(f"⏱ Таймфрейм змінено на: {tf}")
                         await bot.send_message(
                             chat_id=chat_id,
-                            text=f"✅ Таймфрейм змінено на: {tf}\n⏳ Запускаю сканування...",
+                            text=f"✅  Таймфрейм змінено на: {tf}\n⏳ Запускаю сканування...",
                             reply_markup={'inline_keyboard': get_timeframe_keyboard(active_timeframe)}
                         )
                         try:
@@ -2163,7 +2229,7 @@ async def handle_updates(bot, active_signals):
                     elif data == 'cfg_close':
                         await bot.send_message(
                             chat_id=chat_id,
-                            text="⚙️"
+                            text="⚙️ Меню налаштувань закрито."
                         )
 
                     elif data == 'toggle_exchange':
@@ -2175,18 +2241,29 @@ async def handle_updates(bot, active_signals):
                             if hasattr(scanner, 'exchange') and scanner.exchange:
                                 asyncio.create_task(scanner.exchange.close())
                         except Exception as e:
-                            print(f"Помилка закриття старої сесії: {e}")
+                            print(f"Помилка закриття старої сесії сканера: {e}")
                         
                         exchange = get_exchange_client(async_mode=False)
                         scanner.exchange = get_exchange_client(async_mode=True)
                         
-                        # ГАРАНТОВАНЕ ГАРЯЧЕ ОНОВЛЕННЯ ГЛОБАЛЬНОГО ЕКСЕКУТОРА ПРИ ЗМІНІ БІРЖІ (АРХІТЕКТУРНА ПРОБЛЕМА №1)
+                        # Singleton при зміні біржі (Рядок global async_exchange прибрано)
+                        if async_exchange:
+                            try:
+                                await async_exchange.close()
+                            except Exception:
+                                pass
+                            async_exchange = None
+
+                        # Оновлюємо глобальний ексекутор (Рядок global прибрано)
                         if global_executor:
-                            await global_executor.close()
+                            try:
+                                await global_executor.close()
+                            except Exception:
+                                pass
                         global_executor = FuturesExecutor(exchange_id=new_exchange, testnet=get_setting('testnet_enabled'))
                         await global_executor.initialize()
                         
-                        print(f"🏛 Біржу успішно перемикнуто на: {new_exchange.upper()}")
+                        print(f"🏛 Біржу успішно перемикнуто на: {new_exchange.upper()}. Singleton CCXT оновлено.")
                         
                         await bot.send_message(
                             chat_id=chat_id,
@@ -2305,7 +2382,6 @@ async def handle_updates(bot, active_signals):
                         text, markup = risk_keyboard()
                         await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
 
-                    # ── Перемикання режимів торгівлі та тестнету (ФАЗА А) ──
                     elif data == 'toggle_trading':
                         current = get_setting('trading_enabled')
                         if current is None:
@@ -2318,7 +2394,29 @@ async def handle_updates(bot, active_signals):
                         current = get_setting('testnet_enabled')
                         if current is None:
                             current = True
-                        set_setting('testnet_enabled', not current)
+                        new_testnet = not current
+                        set_setting('testnet_enabled', new_testnet)
+
+                        # Singleton при зміні режиму торгівлі (Рядок global async_exchange прибрано)
+                        if async_exchange:
+                            try:
+                                await async_exchange.close()
+                            except Exception:
+                                pass
+                            async_exchange = None
+
+                        # Оновлюємо глобальний ексекутор (Рядок global прибрано)
+                        if global_executor:
+                            try:
+                                await global_executor.close()
+                            except Exception:
+                                pass
+                        exchange_name = get_setting('exchange_name') or 'binance'
+                        global_executor = FuturesExecutor(exchange_id=exchange_name, testnet=new_testnet)
+                        await global_executor.initialize()
+
+                        mode_label = "TESTNET / DEMO" if new_testnet else "⚠️ РЕАЛЬНІ ТОРГІВ"
+                        print(f"🔄 Режим торгів змінено на: {mode_label}. Singleton CCXT перезапущено.")
                         text, markup = risk_keyboard()
                         await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode='HTML')
 
@@ -2455,7 +2553,70 @@ async def handle_updates(bot, active_signals):
                         )
 
                     elif data == 'clear_active_confirm':
+                        await bot.send_message(
+                            chat_id=chat_id, 
+                            text="⚠️ <b>[HARD KILL-SWITCH] Запуск екстреної ліквідації...</b> Скасовую всі ордери та закрию позиції по ринку на біржі.", 
+                            parse_mode='HTML'
+                        )
+                        
+                        async_ex = None
+                        closed_symbols = []
+                        try:
+                            async_ex = await get_auth_exchange_client()
+                            
+                            # 1. Отримуємо всі відкриті позиції на біржі прямо зараз
+                            positions_data = await async_ex.fetch_positions()
+                            
+                            for pos in positions_data:
+                                contracts = abs(float(pos.get('contracts', 0.0)))
+                                if contracts > 0:
+                                    symbol_ccxt = pos.get('symbol')
+                                    symbol_clean = symbol_ccxt.replace('/', '').split(':')[0]
+                                    
+                                    # Скасовуємо абсолютно всю сітку ордерів (лімітки, Dobar, умовні стопи)
+                                    await cancel_all_exchange_orders_for_symbol(async_ex, symbol_clean, symbol_ccxt)
+                                    await asyncio.sleep(1.0)
+                                    
+                                    # Надсилаємо аварійний ринковий ордер на закриття (reduceOnly)
+                                    close_side = "sell" if pos.get('side', '').upper() == "LONG" else "buy"
+                                    print(f"🚨 [KILL-SWITCH] Екстрене маркет-закриття {symbol_ccxt}, об'єм: {contracts}")
+                                    await async_ex.create_order(
+                                        symbol=symbol_ccxt,
+                                        type='market',
+                                        side=close_side,
+                                        amount=contracts,
+                                        params={'reduceOnly': True}
+                                    )
+                                    closed_symbols.append(symbol_clean)
+                                    
+                        except Exception as kill_err:
+                            print(f"Помилка під час роботи Hard Kill-Switch на біржі: {kill_err}")
+                            await bot.send_message(
+                                chat_id=chat_id, 
+                                text=f"❌ Помилка екстреного закриття на біржі: <i>{kill_err}</i>", 
+                                parse_mode='HTML'
+                            )
+                            
+                        # 2. Очищуємо базу даних та вбиваємо всі запущені асинхронні таски моніторингу
                         clear_active_signals()
+                        
+                        for task_key, task in list(active_monitors.items()):
+                            if task and not task.done():
+                                task.cancel()
+                        active_monitors.clear()
+                        active_signals.clear()
+                        
+                        # Складаємо фінальний звіт про екстрене вимкнення
+                        closed_list_str = ", ".join([f"#{s}" for s in closed_symbols]) if closed_symbols else "відсутні"
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=f"🔥 <b>[HARD KILL-SWITCH] АВАРІЙНУ ЗУПИНКУ ВИКОНАНО!</b>\n\n"
+                                 f"🚫 <b>Закриті позиції по ринку:</b> {closed_list_str}\n"
+                                 f"🧹 <b>Сітка ордерів:</b> Повністю зачищена (лімітки, Dobar, стопи скасовані).\n"
+                                 f"🗑️ <b>База даних:</b> Повністю очищена.\n"
+                                 f"💤 <b>Процеси:</b> Усі фонові таски моніторингу успішно видалені з оперативної пам'яті.",
+                            parse_mode='HTML'
+                        )
                         
                         # ПРИМУСОВО ВБИВАЄМО ВСІ АКТИВНІ ТАСКИ АСИНХРОННОСТІ (Запобігання зацикленню)
                         for task_key, task in list(active_monitors.items()):
