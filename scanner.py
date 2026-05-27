@@ -8,7 +8,7 @@ import asyncio
 from backtest import run_backtest
 from settings import get_setting, get_exchange_client, to_native_float, to_native_int
 from regime_classifier import MarketRegimeClassifier
-from database import load_strategy_config_from_db
+from database import load_strategy_config_from_db, log_rejected_signal
 
 # Ініціалізація динамічного асинхронного клієнта біржі (Binance або MEXC)
 exchange = get_exchange_client(async_mode=True)
@@ -28,11 +28,11 @@ SAFE_DEFAULTS = {
     },
 }
 
-def get_params(symbol, timeframe, direction):
+def get_params(symbol, timeframe, direction, regime_group):
     symbol_clean = symbol.replace('/', '')
     
-    # Завантажуємо параметри безпосередньо з хмари Neon PostgreSQL
-    db_params = load_strategy_config_from_db(symbol_clean, timeframe, direction)
+    # Завантажуємо параметри з урахуванням активної групи режиму ринку
+    db_params = load_strategy_config_from_db(symbol_clean, timeframe, direction, regime_group)
     
     if db_params:
         return (
@@ -43,7 +43,7 @@ def get_params(symbol, timeframe, direction):
             db_params['strategy_type']
         )
     else:
-        # Фолбек на безпечні значення за замовчуванням, якщо монета ще не була оптимізована
+        # Фолбек на безпечні значення за замовчуванням
         d = SAFE_DEFAULTS[direction]
         return d['ema_fast'], d['ema_slow'], d['rsi_min'], d['rsi_max'], d['strategy_type']
 
@@ -104,9 +104,9 @@ def calculate_indicators(df):
     return df
 
 
-def check_signal_by_type(last, prev, df, symbol, timeframe, direction):
+def check_signal_by_type(last, prev, df, symbol, timeframe, direction, regime_group):
     ema_fast, ema_slow, rsi_min, rsi_max, strategy_type = get_params(
-        symbol, timeframe, direction
+        symbol, timeframe, direction, regime_group
     )
 
     ema_f = ta.trend.ema_indicator(df['close'], window=ema_fast).iloc[-2]
@@ -358,6 +358,39 @@ async def find_signal(symbol, timeframe, scan_logs=None, btc_df=None):
     if len(df) < 3:
         return None
 
+    # --- КРОК 1: ВИЗНАЧЕННЯ РЕЖИМУ РИНКУ НАПОЧАТКУ ---
+    regime_filter = get_setting('regime_filter_enabled')
+    if regime_filter is None:
+        regime_filter = True
+        
+    if regime_filter:
+        try:
+            # Використовуємо стабільний класифікатор
+            classifier = MarketRegimeClassifier()
+            classification = classifier.classify(df)
+            regime = classification["regime"]
+            er = classification["er"]
+            z_vol = classification["z_vol"]
+        except Exception as e:
+            print(f"Помилка розрахунку фільтра ринкового режиму для {symbol}: {e}")
+            regime = "TRANSITION"
+
+    # Аварійне відхилення (LOW_VOL_FLAT або HIGH_VOL_CHAOS)
+    if regime == "LOW_VOL_FLAT":
+        log_skip(f"⛔ {symbol} {timeframe} — мертвий боковик (LOW_VOL_FLAT), торгівлю заблоковано", scan_logs)
+        return None
+    elif regime == "HIGH_VOL_CHAOS":
+        log_skip(f"⛔ {symbol} {timeframe} — хаотична волатильність (HIGH_VOL_CHAOS), торгівлю заблоковано", scan_logs)
+        return None
+
+    # --- КРОК 2: МАПУВАННЯ РЕЖИМУ НА ГРУПУ СТРАТЕГІЙ ---
+    if regime == "MEAN_REVERSION":
+        regime_group = "REVERSION"
+    elif regime == "STABLE_TREND":
+        regime_group = "TREND"
+    else:
+        regime_group = "TREND" # Фолбек для TRANSITION
+
     last = df.iloc[-2]
     prev = df.iloc[-3]
     current = df.iloc[-1]
@@ -368,70 +401,81 @@ async def find_signal(symbol, timeframe, scan_logs=None, btc_df=None):
     if pd.isna(atr) or atr == 0:
         return None
 
+    # --- КРОК 3: ПЕРЕВІРКА СИГНАЛІВ ПІД АКТИВНИЙ РЕЖИМ ---
     direction = None
-
-    if check_signal_by_type(last, prev, df, symbol, timeframe, 'SHORT'):
+    if check_signal_by_type(last, prev, df, symbol, timeframe, 'SHORT', regime_group):
         direction = 'SHORT'
-    elif check_signal_by_type(last, prev, df, symbol, timeframe, 'LONG'):
+    elif check_signal_by_type(last, prev, df, symbol, timeframe, 'LONG', regime_group):
         direction = 'LONG'
 
     if direction is None:
         return None
 
-    ema_fast, ema_slow, rsi_min, rsi_max, strategy_type = get_params(symbol, timeframe, direction)
+    ema_fast, ema_slow, rsi_min, rsi_max, strategy_type = get_params(symbol, timeframe, direction, regime_group)
 
     is_scalp_strategy = strategy_type in ['wavetrend_bounce', 'bb_bounce', 'mean_reversion']
     is_scalp_tf = timeframe in ['5m', '15m', '30m', '1h']
     mode = 'scalp' if (is_scalp_strategy or is_scalp_tf) else 'swing'
 
-    # --- ІНТЕГРАЦІЯ MARKET REGIME CLASSIFIER ---
-    regime_filter = get_setting('regime_filter_enabled')
-    if regime_filter is None:
-        regime_filter = True
-        
-    if regime_filter:
-        try:
-            # Використовуємо новий стабільний класифікатор
-            classifier = MarketRegimeClassifier()
-            classification = classifier.classify(df)
-            regime = classification["regime"]
-            er = classification["er"]
-            z_vol = classification["z_vol"]
-            
-            trend_strategies = ['ema_rsi', 'macd_cross', 'breakout', 'vol_spike']
-            mean_reversion_strategies = ['bb_bounce', 'mean_reversion', 'wavetrend_bounce']
-            
-            # Фільтрація з урахуванням виявленого фазового стану ринку
-            if strategy_type in trend_strategies and regime in ["LOW_VOL_FLAT", "MEAN_REVERSION"]:
-                log_skip(f"⛔ {symbol} {timeframe} {direction} — ринок у ренджі ({regime}), трендовий вхід заблоковано класифікатором", scan_logs)
-                return None
-            elif strategy_type in mean_reversion_strategies and regime in ["STABLE_TREND"]:
-                log_skip(f"⛔ {symbol} {timeframe} {direction} — сильний тренд ({regime}), контртрендовий вхід заблоковано класифікатором", scan_logs)
-                return None
-            elif regime == "HIGH_VOL_CHAOS":
-                log_skip(f"⛔ {symbol} {timeframe} {direction} — ринок у фазі аномальної волатильності/хаосу ({regime}), торгівлю зупинено", scan_logs)
-                return None
-        except Exception as e:
-            print(f"Помилка розрахунку фільтра ринкового режиму для {symbol}: {e}")
-    # ---------------------------------------------
+    # Розрахунок цін для телеметрії
+    entry = round(price, 6)
+    stop_mult = get_setting('stop_atr_mult') or 2.0
+    tp1_mult = get_setting('tp1_atr_mult') or 0.8
 
+    if direction == 'SHORT':
+        stop_loss = round(entry + atr * stop_mult, 6)
+    else:
+        stop_loss = round(entry - atr * stop_mult, 6)
+
+    # --- КРОК 4: ФІЛЬТРАЦІЯ (З ОДНОЧАСНИМ ЛОГУВАННЯМ У ТЕЛЕМЕТРІЮ) ---
+    
+    # 4.1 Подвійний контроль сумісності режимів
+    trend_strategies = ['ema_rsi', 'macd_cross', 'breakout', 'vol_spike']
+    mean_reversion_strategies = ['bb_bounce', 'mean_reversion', 'wavetrend_bounce']
+    
+    if strategy_type in trend_strategies and regime in ["LOW_VOL_FLAT", "MEAN_REVERSION"]:
+        reason = f"REGIME_FILTER_TREND_IN_RANGE ({regime})"
+        log_skip(f"⛔ {symbol} {timeframe} {direction} — {reason}", scan_logs)
+        log_rejected_signal(
+            symbol=symbol, timeframe=timeframe, direction=direction,
+            entry=entry, stop_loss=stop_loss, reason=reason,
+            regime=regime, er=er, z_vol=z_vol
+        )
+        return None
+    elif strategy_type in mean_reversion_strategies and regime in ["STABLE_TREND"]:
+        reason = f"REGIME_FILTER_MR_IN_TREND ({regime})"
+        log_skip(f"⛔ {symbol} {timeframe} {direction} — {reason}", scan_logs)
+        log_rejected_signal(
+            symbol=symbol, timeframe=timeframe, direction=direction,
+            entry=entry, stop_loss=stop_loss, reason=reason,
+            regime=regime, er=er, z_vol=z_vol
+        )
+        return None
+
+    # 4.2 Фільтр кореляції та тренду BTC
     btc_pass, correlation = await check_btc_and_correlation(symbol, timeframe, df, direction, scan_logs, btc_df)
     if not btc_pass:
+        log_rejected_signal(
+            symbol=symbol, timeframe=timeframe, direction=direction,
+            entry=entry, stop_loss=stop_loss, reason="BTC_TREND_FILTER_BLOCKED",
+            correlation=correlation, regime=regime, er=er, z_vol=z_vol
+        )
         return None
 
+    # 4.3 Фільтр тренду старшого таймфрейму (HTF BIAS)
     bias_ok = await check_higher_tf_bias(symbol, timeframe, direction, scan_logs)
     if not bias_ok:
+        log_rejected_signal(
+            symbol=symbol, timeframe=timeframe, direction=direction,
+            entry=entry, stop_loss=stop_loss, reason="HTF_BIAS_FILTER_BLOCKED",
+            correlation=correlation, regime=regime, er=er, z_vol=z_vol
+        )
         return None
 
-    entry = round(price, 6)
-
-    stop_mult = get_setting('stop_atr_mult')
-    tp1_mult = get_setting('tp1_atr_mult')
-
+    # Розрахунок зон Dobar та цілей Take-Profit
     if direction == 'SHORT':
         dobar_low = round(entry + atr * 0.5, 6)
         dobar_high = round(entry + atr * 1.5, 6)
-        stop_loss = round(entry + atr * stop_mult, 6)
         tps = [
             (round(entry - atr * tp1_mult, 6), 90, round(atr * tp1_mult / entry * 100, 1)),
             (round(entry - atr * (tp1_mult + 0.5), 6), 75, round(atr * (tp1_mult + 0.5) / entry * 100, 1)),
@@ -441,7 +485,6 @@ async def find_signal(symbol, timeframe, scan_logs=None, btc_df=None):
     else:
         dobar_low = round(entry - atr * 1.5, 6)
         dobar_high = round(entry - atr * 0.5, 6)
-        stop_loss = round(entry - atr * stop_mult, 6)
         tps = [
             (round(entry + atr * tp1_mult, 6), 90, round(atr * tp1_mult / entry * 100, 1)),
             (round(entry + atr * (tp1_mult + 0.5), 6), 75, round(atr * (tp1_mult + 0.5) / entry * 100, 1)),
@@ -449,6 +492,7 @@ async def find_signal(symbol, timeframe, scan_logs=None, btc_df=None):
             (round(entry + atr * (tp1_mult + 2.2), 6), 40, round(atr * (tp1_mult + 2.2) / entry * 100, 1)),
         ]
 
+    # 4.4 Фільтр бектесту
     exchange_name = get_setting('exchange_name') or 'binance'
     if exchange_name == 'mexc':
         min_trades = 6 if timeframe in ['5m', '15m', '30m'] else 10
@@ -470,18 +514,31 @@ async def find_signal(symbol, timeframe, scan_logs=None, btc_df=None):
     )
 
     if not stats or not stats.get('is_valid', False):
-        log_skip(f"⛔ {symbol} {timeframe} {direction} — слабка стратегія на бектесті, пропускаємо", scan_logs)
+        reason = "BACKTEST_INVALID_OR_NO_EDGE"
+        log_skip(f"⛔ {symbol} {timeframe} {direction} — {reason}", scan_logs)
+        log_rejected_signal(
+            symbol=symbol, timeframe=timeframe, direction=direction,
+            entry=entry, stop_loss=stop_loss, reason=reason,
+            correlation=correlation, regime=regime, er=er, z_vol=z_vol
+        )
         return None
 
     min_prob = get_setting('min_tp1_prob')
     tp1_prob = stats['tp_probs'][0] if stats['count'] > 0 else 0
 
     if tp1_prob < min_prob:
-        log_skip(f"⛔ {symbol} {timeframe} {direction} — ймовірність TP1 ({tp1_prob}%) менша за мінімальну ({min_prob}%), пропускаємо", scan_logs)
+        reason = f"TP1_PROB_TOO_LOW ({tp1_prob}% below {min_prob}%)"
+        log_skip(f"⛔ {symbol} {timeframe} {direction} — {reason}", scan_logs)
+        log_rejected_signal(
+            symbol=symbol, timeframe=timeframe, direction=direction,
+            entry=entry, stop_loss=stop_loss, reason=reason,
+            correlation=correlation, regime=regime, er=er, z_vol=z_vol
+        )
         return None
 
     ccxt_symbol = f"{symbol}:USDT"
     
+    # 4.5 Фільтр ставки фінансування (Funding Rate)
     funding_filt = get_setting('funding_filter_enabled')
     if funding_filt is None:
         funding_filt = True
@@ -503,12 +560,25 @@ async def find_signal(symbol, timeframe, scan_logs=None, btc_df=None):
     if funding_rate is not None and funding_filt:
         funding_rate_pct = funding_rate * 100.0
         if direction == 'LONG' and funding_rate_pct >= funding_max_pct:
-            log_skip(f"⛔ {symbol} — Фільтр фандингу заблокував LONG (Перегрів покупців: {funding_rate_pct:.3f}% >= {funding_max_pct}%)", scan_logs)
+            reason = f"FUNDING_FILTER_LONG_OVERHEAT ({funding_rate_pct:.3f}% over {funding_max_pct}%)"
+            log_skip(f"⛔ {symbol} — {reason}", scan_logs)
+            log_rejected_signal(
+                symbol=symbol, timeframe=timeframe, direction=direction,
+                entry=entry, stop_loss=stop_loss, reason=reason,
+                correlation=correlation, funding_rate=funding_rate_pct, regime=regime, er=er, z_vol=z_vol
+            )
             return None
         elif direction == 'SHORT' and funding_rate_pct <= -funding_max_pct:
-            log_skip(f"⛔ {symbol} — Фільтр фандингу заблокував SHORT (Перегрів продавців: {funding_rate_pct:.3f}% <= -{funding_max_pct}%)", scan_logs)
+            reason = f"FUNDING_FILTER_SHORT_OVERHEAT ({funding_rate_pct:.3f}% under -{funding_max_pct}%)"
+            log_skip(f"⛔ {symbol} — {reason}", scan_logs)
+            log_rejected_signal(
+                symbol=symbol, timeframe=timeframe, direction=direction,
+                entry=entry, stop_loss=stop_loss, reason=reason,
+                correlation=correlation, funding_rate=funding_rate_pct, regime=regime, er=er, z_vol=z_vol
+            )
             return None
         
+    # 4.6 Фільтр відкритого інтересу (Open Interest)
     try:
         ccxt_symbol = f"{symbol}:USDT"
         oi_data = await exchange.fetch_open_interest(ccxt_symbol)
@@ -548,7 +618,14 @@ async def find_signal(symbol, timeframe, scan_logs=None, btc_df=None):
     if open_interest is not None and oi_filt:
         oi_m = open_interest / 1000000.0
         if oi_m < oi_min_limit:
-            log_skip(f"⛔ {symbol} — Фільтр мінімального OI заблокував сигнал (Низька деривативна ліквідність: ${oi_m:.2f}M < ${oi_min_limit:.1f}M)", scan_logs)
+            reason = f"OI_FILTER_LOW_LIQUIDITY (${oi_m:.2f}M below ${oi_min_limit:.1f}M)"
+            log_skip(f"⛔ {symbol} — {reason}", scan_logs)
+            log_rejected_signal(
+                symbol=symbol, timeframe=timeframe, direction=direction,
+                entry=entry, stop_loss=stop_loss, reason=reason,
+                correlation=correlation, funding_rate=funding_rate * 100.0 if funding_rate is not None else None,
+                open_interest=open_interest, regime=regime, er=er, z_vol=z_vol
+            )
             return None
 
     if stats['count'] > 0:
@@ -581,10 +658,10 @@ async def find_signal(symbol, timeframe, scan_logs=None, btc_df=None):
         'funding_rate': funding_rate * 100.0 if funding_rate is not None else None,
         'open_interest': open_interest,
         'mode': mode,
-        'strategy_type': strategy_type, # Передаємо тип стратегії
-        'regime': regime,               # Передаємо фазу
-        'er': er,                       # Передаємо Kaufman ER
-        'z_vol': z_vol                  # Передаємо Z-Score волатильності
+        'strategy_type': strategy_type,
+        'regime': regime,
+        'er': er,
+        'z_vol': z_vol
     }
 
 
@@ -634,3 +711,63 @@ async def scan_all(timeframes=None, scan_logs=None):
             signals.append(result)
 
     return signals
+
+async def get_market_regime_distribution():
+    """Аналізує поточний режим ринку для всього списку монет"""
+    from settings import get_setting
+    
+    watchlist = get_setting('watchlist')
+    distribution = {"STABLE_TREND": 0, "MEAN_REVERSION": 0, "LOW_VOL_FLAT": 0, "HIGH_VOL_CHAOS": 0, "TRANSITION": 0}
+    
+    btc_regime = "UNKNOWN"
+    btc_er = 0.5
+    btc_z = 0.0
+    
+    # 1. Аналіз BTC
+    btc_df = await get_candles('BTC/USDT', '4h', limit=500)
+    if btc_df is not None:
+        classification = MarketRegimeClassifier().classify(btc_df)
+        btc_regime = classification["regime"]
+        btc_er = classification["er"]
+        btc_z = classification["z_vol"]
+        
+    # Перейменування фази BTC для гарного відображення
+    btc_regime_map = {
+        "STABLE_TREND": "📈 ТРЕНД (Stable Trend)",
+        "MEAN_REVERSION": "🔄 БОКОВИК (Mean Reversion)",
+        "LOW_VOL_FLAT": "💤 НАКОПИЧЕННЯ (Low Vol Flat)",
+        "HIGH_VOL_CHAOS": "🚨 ХАОС (High Vol Chaos)",
+        "TRANSITION": "🌀 ЗМІНА ФАЗИ (Transition)"
+    }
+    btc_display_regime = btc_regime_map.get(btc_regime, btc_regime)
+
+    # 2. Аналіз Watchlist (паралельно)
+    async def analyze_coin(symbol):
+        df = await get_candles(symbol, '1h', limit=500)
+        if df is not None:
+            classification = MarketRegimeClassifier().classify(df)
+            return classification["regime"]
+        return "TRANSITION"
+        
+    tasks = [analyze_coin(symbol) for symbol in watchlist]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    for res in results:
+        if isinstance(res, str) and res in distribution:
+            distribution[res] += 1
+            
+    total = len(watchlist)
+    lines = [
+        "📊 <b>ГЛОБАЛЬНИЙ СТАН РИНКУ (Market Regime)</b>\n",
+        f"🪙 <b>Біткоїн (BTC/USDT - 4h):</b>",
+        f"  • Поточна фаза: <code>{btc_display_regime}</code>",
+        f"  • Ефективність (ER): <b>{btc_er:.2f}</b>",
+        f"  • Z-score волатильності: <b>{btc_z:.2f}</b>\n",
+        f"📦 <b>Розподіл фаз Watchlist ({total} активів):</b>",
+        f"  📈 Тренд (TREND): <b>{distribution['STABLE_TREND']}</b> ({distribution['STABLE_TREND']/total*100:.1f}%)",
+        f"  🔄 Боковик (REVERSION): <b>{distribution['MEAN_REVERSION']}</b> ({distribution['MEAN_REVERSION']/total*100:.1f}%)",
+        f"  🌀 Зміна фази (TRANSITION): <b>{distribution['TRANSITION']}</b> ({distribution['TRANSITION']/total*100:.1f}%)", # Додано!
+        f"  💤 Накопичення (FLAT): <b>{distribution['LOW_VOL_FLAT']}</b> ({distribution['LOW_VOL_FLAT']/total*100:.1f}%)",
+        f"  🚨 Хаос (CHAOS): <b>{distribution['HIGH_VOL_CHAOS']}</b> ({distribution['HIGH_VOL_CHAOS']/total*100:.1f}%)"
+    ]
+    return "\n".join(lines)

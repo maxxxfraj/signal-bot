@@ -32,6 +32,7 @@ from database import (
     to_native_float, to_native_int
 )
 from database import get_daily_pnl_usd, get_consecutive_losses_count, get_last_trade_closed_at
+from database import get_rejected_stats_summary
 from executor import FuturesExecutor
 import os
 import io
@@ -1857,8 +1858,9 @@ def main_reply_keyboard():
     """Створює постійне нижнє Reply-меню для зручної навігації"""
     keyboard = [
         [KeyboardButton("🔍 Сканувати зараз"), KeyboardButton("📊 Статистика")],
-        [KeyboardButton("⏳ Активні сигнали"), KeyboardButton("📈  Аналітика виконання")],
-        [KeyboardButton("⚙️ Налаштування"), KeyboardButton("ℹ️ Про бота")]
+        [KeyboardButton("⏳ Активні сигнали"), KeyboardButton("💵 Стан ринку")],
+        [KeyboardButton("📈  Аналітика виконання"), KeyboardButton("⚙️ Налаштування")],
+        [KeyboardButton("ℹ️ Про бота")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
 
@@ -1866,7 +1868,7 @@ def main_reply_keyboard():
 async def scheduled_report_loop(bot):
     """
     Фоновий таймер, що автоматично надсилає звіт виконання (Slippage & Latency)
-    2 рази на добу строго о 09:00 та 21:00 за UTC.
+    та аналітику ринкових режимів 2 рази на добу строго о 09:00 та 21:00 за UTC.
     """
     print("📢 Запуск сервісу автоматичної розсилки аналітичних звітів (2 рази на добу)...")
     while True:
@@ -1882,10 +1884,19 @@ async def scheduled_report_loop(bot):
             next_report = (now + pd.Timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
             
         sleep_seconds = (next_report - now).total_seconds()
-        # Безпечний зсув на 5 секунд
         await asyncio.sleep(sleep_seconds + 5)
         
         try:
+            # 1. Надсилаємо глобальний стан ринку
+            from scanner import get_market_regime_distribution
+            regime_report = await get_market_regime_distribution()
+            await bot.send_message(
+                chat_id=CHAT_ID,
+                text=regime_report,
+                parse_mode='HTML'
+            )
+            
+            # 2. Надсилаємо аналітику затримок та прослизання угод
             from database import get_execution_analytics_summary
             report_text = get_execution_analytics_summary()
             await bot.send_message(
@@ -1896,8 +1907,6 @@ async def scheduled_report_loop(bot):
             print("📢 Автоматичний аналітичний звіт успішно надіслано.")
         except Exception as e:
             print(f"Помилка автоматичної розсилки звітів: {e}")
-
-# main.py
 
 async def handle_updates(bot, active_signals):
     global active_timeframe, exchange, global_executor, active_monitors, async_exchange
@@ -1930,11 +1939,28 @@ async def handle_updates(bot, active_signals):
                     elif text == '📊 Статистика' or text == '/stats':
                         summary = get_stats_summary()
                         await bot.send_message(chat_id=chat_id, text=summary, parse_mode='HTML')
+                        
+                        # Додаємо автоматичний вивід телеметрії відхилень разом із фінансовим звітом!
+                        rejected_summary = get_rejected_stats_summary()
+                        await bot.send_message(chat_id=chat_id, text=rejected_summary, parse_mode='HTML')
 
                     elif text == '📈  Аналітика виконання':
                         from database import get_execution_analytics_summary
                         report = get_execution_analytics_summary()
                         await bot.send_message(chat_id=chat_id, text=report, parse_mode='HTML')
+
+                    elif text == '💵 Стан ринку' or text == '/regime':
+                        await bot.send_message(
+                            chat_id=chat_id, 
+                            text="⏳ Розраховую поточні фази ринку для BTC та 37 активів. Будь ласка, зачекайте..."
+                        )
+                        try:
+                            from scanner import get_market_regime_distribution
+                            report = await get_market_regime_distribution()
+                            await bot.send_message(chat_id=chat_id, text=report, parse_mode='HTML')
+                        except Exception as e:
+                            print(f"Помилка ручного запиту стану ринку: {e}")
+                            await bot.send_message(chat_id=chat_id, text="❌ Не вдалося отримати звіт стану ринку.")
 
                     elif text == '🔍 Сканувати зараз' or text == '/scan':
                         if is_scanning:

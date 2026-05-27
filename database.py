@@ -5,6 +5,7 @@ from psycopg2.extras import RealDictCursor
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 import numpy as np
+import html
 
 # Імпортуємо налаштування та утиліти приведення типів з settings.py на самому початку
 from settings import get_setting, to_native_float, to_native_int
@@ -101,6 +102,7 @@ def init_db():
             symbol VARCHAR(20) NOT NULL,
             timeframe VARCHAR(10) NOT NULL,
             direction VARCHAR(10) NOT NULL,
+            regime_group VARCHAR(20) NOT NULL, -- 'TREND' або 'REVERSION'
             ema_fast INTEGER NOT NULL,
             ema_slow INTEGER NOT NULL,
             rsi_min INTEGER NOT NULL,
@@ -108,7 +110,27 @@ def init_db():
             score REAL NOT NULL,
             strategy_type VARCHAR(30) NOT NULL,
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (symbol, timeframe, direction)
+            PRIMARY KEY (symbol, timeframe, direction, regime_group)
+        )
+    ''')
+
+   # Створюємо таблицю заблокованих сигналів для аналітики телеметрії фільтрів
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS rejected_signals (
+            id SERIAL PRIMARY KEY,
+            symbol VARCHAR(20) NOT NULL,
+            timeframe VARCHAR(10) NOT NULL,
+            direction VARCHAR(10) NOT NULL,
+            entry REAL,
+            stop_loss REAL,
+            reason TEXT NOT NULL,
+            correlation REAL,
+            funding_rate REAL,
+            open_interest REAL,
+            regime VARCHAR(30),
+            er REAL,
+            z_vol REAL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         )
     ''')
 
@@ -822,15 +844,14 @@ def get_execution_analytics_summary():
     finally:
         conn.close()
 
-def save_strategy_config_to_db(symbol, timeframe, direction, ema_fast, ema_slow, rsi_min, rsi_max, score, strategy_type):
-    """Зберігає або оновлює оптимізовані параметри у PostgreSQL Neon"""
+def save_strategy_config_to_db(symbol, timeframe, direction, regime_group, ema_fast, ema_slow, rsi_min, rsi_max, score, strategy_type):
     conn = get_connection()
     try:
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO strategy_configs (symbol, timeframe, direction, ema_fast, ema_slow, rsi_min, rsi_max, score, strategy_type, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-            ON CONFLICT (symbol, timeframe, direction) DO UPDATE SET
+            INSERT INTO strategy_configs (symbol, timeframe, direction, regime_group, ema_fast, ema_slow, rsi_min, rsi_max, score, strategy_type, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (symbol, timeframe, direction, regime_group) DO UPDATE SET
                 ema_fast = EXCLUDED.ema_fast,
                 ema_slow = EXCLUDED.ema_slow,
                 rsi_min = EXCLUDED.rsi_min,
@@ -838,31 +859,92 @@ def save_strategy_config_to_db(symbol, timeframe, direction, ema_fast, ema_slow,
                 score = EXCLUDED.score,
                 strategy_type = EXCLUDED.strategy_type,
                 updated_at = NOW()
-        ''', (symbol, timeframe, direction, ema_fast, ema_slow, rsi_min, rsi_max, score, strategy_type))
+        ''', (symbol, timeframe, direction, regime_group, ema_fast, ema_slow, rsi_min, rsi_max, score, strategy_type))
         conn.commit()
         cursor.close()
-        print(f"💾 [DB CONFIG] Параметри для {symbol} ({timeframe} {direction}) успішно збережено в Neon.")
     except Exception as e:
-        print(f"Помилка збереження конфігурації стратегії в БД: {e}")
+        print(f"Помилка збереження конфігурації в БД: {e}")
     finally:
         conn.close()
 
 
-def load_strategy_config_from_db(symbol, timeframe, direction):
-    """Завантажує параметри стратегії безпосередньо з бази даних"""
+def load_strategy_config_from_db(symbol, timeframe, direction, regime_group):
     conn = get_connection()
     try:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute('''
             SELECT ema_fast, ema_slow, rsi_min, rsi_max, strategy_type 
             FROM strategy_configs 
-            WHERE symbol = %s AND timeframe = %s AND direction = %s
-        ''', (symbol, timeframe, direction))
+            WHERE symbol = %s AND timeframe = %s AND direction = %s AND regime_group = %s
+        ''', (symbol, timeframe, direction, regime_group))
         row = cursor.fetchone()
         cursor.close()
         return row
     except Exception as e:
-        print(f"Помилка завантаження конфігурації стратегії з БД: {e}")
+        print(f"Помилка завантаження конфігурації з БД: {e}")
         return None
+    finally:
+        conn.close()
+
+def log_rejected_signal(symbol, timeframe, direction, entry, stop_loss, reason, 
+                        correlation=None, funding_rate=None, open_interest=None, 
+                        regime=None, er=None, z_vol=None):
+    """Записує відхилений фільтрами сигнал у PostgreSQL для подальшого аналізу"""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO rejected_signals (
+                symbol, timeframe, direction, entry, stop_loss, reason, 
+                correlation, funding_rate, open_interest, regime, er, z_vol
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ''', (
+            symbol, timeframe, direction, to_native_float(entry), to_native_float(stop_loss), reason,
+            to_native_float(correlation), to_native_float(funding_rate), to_native_float(open_interest),
+            regime, to_native_float(er), to_native_float(z_vol)
+        ))
+        conn.commit()
+        cursor.close()
+        print(f"📊 [TELEMETRY] Зафіксовано відхилення сигналу {symbol} {timeframe}. Причина: {reason}")
+    except Exception as e:
+        print(f"Помилка логування відхиленого сигналу: {e}")
+    finally:
+        conn.close()
+
+
+# 3. Додайте функцію вивантаження аналітики в Telegram у кінець файлу database.py
+def get_rejected_stats_summary():
+    """Повертає статистику заблокованих сигналів по фільтрах за останні 30 днів"""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute('''
+            SELECT reason, COUNT(*) as count 
+            FROM rejected_signals 
+            WHERE created_at >= NOW() - INTERVAL '30 days'
+            GROUP BY reason 
+            ORDER BY count DESC
+        ''')
+        rows = cursor.fetchall()
+        cursor.close()
+        
+        if not rows:
+            return "📋 <b>Телеметрія відхилених сигналів</b>\n\nНемає зафіксованих записів за останні 30 днів."
+            
+        total = sum(row['count'] for row in rows)
+        lines = [
+            "📋 <b>ТЕЛЕМЕТРІЯ ФІЛЬТРІВ (За 30 днів)</b>",
+            f"Усього заблоковано сигналів: <b>{total}</b>",
+            ""
+        ]
+        for row in rows:
+            pct = (row['count'] / total) * 100.0
+            escaped_reason = html.escape(row['reason'])
+            lines.append(f"• <code>{escaped_reason}</code>: <b>{row['count']}</b> ({pct:.1f}%)")
+            
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"Помилка отримання телеметрії відхилень: {e}")
+        return "❌ Помилка розрахунку телеметрії відхилень"
     finally:
         conn.close()

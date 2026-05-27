@@ -249,28 +249,31 @@ def run_oos_backtest_for_optimization(df, ema_fast, ema_slow, rsi_min, rsi_max, 
 
 def optimize_symbol_wf(symbol, timeframe, df):
     """
-    Проводить Walk-Forward оптимізацію: підбирає параметри на In-Sample (70%)
-    та валідує їх на Out-of-Sample (30%) за допомогою t-статистики.
+    Проводить Walk-Forward оптимізацію: підбирає параметри окремо для трендової (TREND) 
+    та контртрендової (REVERSION) фаз ринку та валідує їх на Out-of-Sample (30%) за допомогою t-статистики.
     """
     validator = QuantitativeEdgeValidator(target_oos_ratio=0.30, fee_rate=FEE_RATE, slippage_pct=SLIPPAGE)
     
     # Спліт даних
     df_is, df_oos = validator.split_data(df)
     
-    strategy_types = ['ema_rsi', 'macd_cross', 'bb_bounce', 'breakout']
-    best_configs = {}
+    trend_strategies = ['ema_rsi', 'macd_cross', 'breakout']
+    reversion_strategies = ['bb_bounce', 'wavetrend_bounce']
+    
+    saved_configs = []
 
     stop_mult = get_setting('stop_atr_mult') or 2.0
     tp1_mult = get_setting('tp1_atr_mult') or 0.8
 
     for direction in ['LONG', 'SHORT']:
-        best_score = -999.0
-        best_params = None
-
         rsi_min_opts = RSI_MIN_SHORT if direction == 'SHORT' else RSI_MIN_LONG
         rsi_max_opts = RSI_MAX_SHORT if direction == 'SHORT' else RSI_MAX_LONG
 
-        for strategy_type in strategy_types:
+        # 1. ОПТИМІЗАЦІЯ ЯДРА А (TREND ENGINE)
+        best_trend_score = -999.0
+        best_trend_params = None
+
+        for strategy_type in trend_strategies:
             for ema_fast, ema_slow in product(EMA_FAST_OPTIONS, EMA_SLOW_OPTIONS):
                 if ema_fast >= ema_slow:
                     continue
@@ -303,9 +306,11 @@ def optimize_symbol_wf(symbol, timeframe, df):
 
                     edge_results = validator.evaluate_edge(oos_trades)
 
-                    if edge_results["is_valid_edge"] and edge_results["t_stat"] > best_score:
-                        best_score = edge_results["t_stat"]
-                        best_params = {
+                    if edge_results["is_valid_edge"] and edge_results["t_stat"] > best_trend_score:
+                        best_trend_score = edge_results["t_stat"]
+                        best_trend_params = {
+                            'direction': direction,
+                            'regime_group': 'TREND',
                             'ema_fast': int(ema_fast),
                             'ema_slow': int(ema_slow),
                             'rsi_min': int(rsi_min),
@@ -314,17 +319,70 @@ def optimize_symbol_wf(symbol, timeframe, df):
                             'strategy_type': strategy_type
                         }
 
-        if best_params:
-            best_configs[direction] = best_params
+        if best_trend_params:
+            saved_configs.append(best_trend_params)
 
-    return best_configs if best_configs else None
+        # 2. ОПТИМІЗАЦІЯ ЯДРА Б (REVERSION ENGINE)
+        best_reversion_score = -999.0
+        best_reversion_params = None
+
+        for strategy_type in reversion_strategies:
+            for ema_fast, ema_slow in product(EMA_FAST_OPTIONS, EMA_SLOW_OPTIONS):
+                if ema_fast >= ema_slow:
+                    continue
+
+                for rsi_min, rsi_max in product(rsi_min_opts, rsi_max_opts):
+                    if rsi_min >= rsi_max:
+                        continue
+
+                    df_is_ind = calculate_indicators(df_is, ema_fast, ema_slow)
+                    if len(df_is_ind) < 100:
+                        continue
+
+                    is_trades = run_oos_backtest_for_optimization(
+                        df_is_ind, ema_fast, ema_slow, rsi_min, rsi_max, direction, strategy_type, stop_mult, tp1_mult
+                    )
+                    
+                    if len(is_trades) < 15:
+                        continue
+                    
+                    is_pnl_array = np.array([t['net_pnl'] for t in is_trades])
+                    is_mean = np.mean(is_pnl_array)
+                    
+                    if is_mean <= 0.15:
+                        continue
+
+                    df_oos_ind = calculate_indicators(df_oos, ema_fast, ema_slow)
+                    oos_trades = run_oos_backtest_for_optimization(
+                        df_oos_ind, ema_fast, ema_slow, rsi_min, rsi_max, direction, strategy_type, stop_mult, tp1_mult
+                    )
+
+                    edge_results = validator.evaluate_edge(oos_trades)
+
+                    if edge_results["is_valid_edge"] and edge_results["t_stat"] > best_reversion_score:
+                        best_reversion_score = edge_results["t_stat"]
+                        best_reversion_params = {
+                            'direction': direction,
+                            'regime_group': 'REVERSION',
+                            'ema_fast': int(ema_fast),
+                            'ema_slow': int(ema_slow),
+                            'rsi_min': int(rsi_min),
+                            'rsi_max': int(rsi_max),
+                            'score': float(edge_results["t_stat"]),
+                            'strategy_type': strategy_type
+                        }
+
+        if best_reversion_params:
+            saved_configs.append(best_reversion_params)
+
+    return saved_configs if saved_configs else None
 
 
-def save_strategy_config_to_db_with_retry(symbol, timeframe, direction, ema_fast, ema_slow, rsi_min, rsi_max, score, strategy_type, retries=5):
+def save_strategy_config_to_db_with_retry(symbol, timeframe, direction, regime_group, ema_fast, ema_slow, rsi_min, rsi_max, score, strategy_type, retries=5):
     """Спроба зберегти конфігурацію у PostgreSQL з експоненціальним очікуванням при збоях пулера Neon"""
     for attempt in range(retries):
         try:
-            save_strategy_config_to_db(symbol, timeframe, direction, ema_fast, ema_slow, rsi_min, rsi_max, score, strategy_type)
+            save_strategy_config_to_db(symbol, timeframe, direction, regime_group, ema_fast, ema_slow, rsi_min, rsi_max, score, strategy_type)
             return True
         except Exception as db_err:
             if attempt == retries - 1:
@@ -377,12 +435,13 @@ def run_optimizer():
                 symbol_clean = symbol.replace('/', '')
 
                 if result:
-                    for direction, params in result.items():
+                    for params in result:
                         # Використовуємо надійну функцію запису з Retry-запобіжником
                         save_strategy_config_to_db_with_retry(
                             symbol=symbol_clean,
                             timeframe=timeframe,
-                            direction=direction,
+                            direction=params['direction'],
+                            regime_group=params['regime_group'],
                             ema_fast=params['ema_fast'],
                             ema_slow=params['ema_slow'],
                             rsi_min=params['rsi_min'],
@@ -391,7 +450,7 @@ def run_optimizer():
                             strategy_type=params['strategy_type']
                         )
                         saved_count += 1
-                    print(f"[{done}/{total}] ✅ {symbol} {timeframe} — Оптимальні OOS параметри збережено у Neon PostgreSQL!")
+                    print(f"[{done}/{total}] ✅ {symbol} {timeframe} — Оптимальні OOS параметри ({len(result)} конфігурацій) збережено у Neon PostgreSQL!")
                 else:
                     print(f"[{done}/{total}] ⛔ {symbol} {timeframe} — стійкої переваги поза вибіркою не знайдено.")
 
