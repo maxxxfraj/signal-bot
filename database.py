@@ -103,12 +103,24 @@ def init_db():
             timeframe VARCHAR(10) NOT NULL,
             direction VARCHAR(10) NOT NULL,
             regime_group VARCHAR(20) NOT NULL, -- 'TREND' або 'REVERSION'
-            ema_fast INTEGER NOT NULL,
-            ema_slow INTEGER NOT NULL,
-            rsi_min INTEGER NOT NULL,
-            rsi_max INTEGER NOT NULL,
-            score REAL NOT NULL,
             strategy_type VARCHAR(30) NOT NULL,
+            score REAL NOT NULL,
+            
+            -- Трендові параметри (TREND)
+            ema_fast INTEGER,
+            ema_slow INTEGER,
+            rsi_min INTEGER,
+            rsi_max INTEGER,
+            
+            -- Параметри Боллінджера (REVERSION - bb_bounce)
+            bb_window INTEGER,
+            bb_std REAL,
+            
+            -- Параметри WaveTrend (REVERSION - wavetrend_bounce)
+            wt_channel_len INTEGER,
+            wt_average_len INTEGER,
+            wt_dot_level INTEGER,
+            
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (symbol, timeframe, direction, regime_group)
         )
@@ -844,37 +856,55 @@ def get_execution_analytics_summary():
     finally:
         conn.close()
 
-def save_strategy_config_to_db(symbol, timeframe, direction, regime_group, ema_fast, ema_slow, rsi_min, rsi_max, score, strategy_type):
+def save_strategy_config_to_db(symbol, timeframe, direction, regime_group, strategy_type, score,
+                               ema_fast=None, ema_slow=None, rsi_min=None, rsi_max=None,
+                               bb_window=None, bb_std=None,
+                               wt_channel_len=None, wt_average_len=None, wt_dot_level=None):
+    """Зберігає параметри стратегії у відповідні явні колонки БД"""
     conn = get_connection()
     try:
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO strategy_configs (symbol, timeframe, direction, regime_group, ema_fast, ema_slow, rsi_min, rsi_max, score, strategy_type, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            INSERT INTO strategy_configs (
+                symbol, timeframe, direction, regime_group, strategy_type, score,
+                ema_fast, ema_slow, rsi_min, rsi_max,
+                bb_window, bb_std,
+                wt_channel_len, wt_average_len, wt_dot_level, updated_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
             ON CONFLICT (symbol, timeframe, direction, regime_group) DO UPDATE SET
+                strategy_type = EXCLUDED.strategy_type,
+                score = EXCLUDED.score,
                 ema_fast = EXCLUDED.ema_fast,
                 ema_slow = EXCLUDED.ema_slow,
                 rsi_min = EXCLUDED.rsi_min,
                 rsi_max = EXCLUDED.rsi_max,
-                score = EXCLUDED.score,
-                strategy_type = EXCLUDED.strategy_type,
+                bb_window = EXCLUDED.bb_window,
+                bb_std = EXCLUDED.bb_std,
+                wt_channel_len = EXCLUDED.wt_channel_len,
+                wt_average_len = EXCLUDED.wt_average_len,
+                wt_dot_level = EXCLUDED.wt_dot_level,
                 updated_at = NOW()
-        ''', (symbol, timeframe, direction, regime_group, ema_fast, ema_slow, rsi_min, rsi_max, score, strategy_type))
+        ''', (
+            symbol, timeframe, direction, regime_group, strategy_type, score,
+            to_native_int(ema_fast), to_native_int(ema_slow), to_native_int(rsi_min), to_native_int(rsi_max),
+            to_native_int(bb_window), to_native_float(bb_std),
+            to_native_int(wt_channel_len), to_native_int(wt_average_len), to_native_int(wt_dot_level)
+        ))
         conn.commit()
         cursor.close()
+        print(f"💾 [DB CONFIG] Збережено явні параметри для {symbol} ({timeframe} {regime_group})")
     except Exception as e:
         print(f"Помилка збереження конфігурації в БД: {e}")
     finally:
         conn.close()
 
-
 def load_strategy_config_from_db(symbol, timeframe, direction, regime_group):
+    """Завантажує весь рядок налаштувань стратегії з БД"""
     conn = get_connection()
     try:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute('''
-            SELECT ema_fast, ema_slow, rsi_min, rsi_max, strategy_type 
-            FROM strategy_configs 
+            SELECT * FROM strategy_configs 
             WHERE symbol = %s AND timeframe = %s AND direction = %s AND regime_group = %s
         ''', (symbol, timeframe, direction, regime_group))
         row = cursor.fetchone()

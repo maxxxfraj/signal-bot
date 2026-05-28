@@ -31,21 +31,26 @@ SAFE_DEFAULTS = {
 def get_params(symbol, timeframe, direction, regime_group):
     symbol_clean = symbol.replace('/', '')
     
-    # Завантажуємо параметри з урахуванням активної групи режиму ринку
+    # Завантажуємо весь оновлений рядок параметрів з явними колонками
     db_params = load_strategy_config_from_db(symbol_clean, timeframe, direction, regime_group)
     
     if db_params:
-        return (
-            db_params['ema_fast'],
-            db_params['ema_slow'],
-            db_params['rsi_min'],
-            db_params['rsi_max'],
-            db_params['strategy_type']
-        )
+        return db_params
     else:
-        # Фолбек на безпечні значення за замовчуванням
+        # Безпечний фолбек за замовчуванням
         d = SAFE_DEFAULTS[direction]
-        return d['ema_fast'], d['ema_slow'], d['rsi_min'], d['rsi_max'], d['strategy_type']
+        return {
+            'ema_fast': d['ema_fast'],
+            'ema_slow': d['ema_slow'],
+            'rsi_min': d['rsi_min'],
+            'rsi_max': d['rsi_max'],
+            'strategy_type': d['strategy_type'],
+            'bb_window': 20,
+            'bb_std': 2.0,
+            'wt_channel_len': 10,
+            'wt_average_len': 21,
+            'wt_dot_level': 45
+        }
 
 
 async def get_candles(symbol, timeframe, limit=1000):
@@ -105,17 +110,20 @@ def calculate_indicators(df):
 
 
 def check_signal_by_type(last, prev, df, symbol, timeframe, direction, regime_group):
-    ema_fast, ema_slow, rsi_min, rsi_max, strategy_type = get_params(
-        symbol, timeframe, direction, regime_group
-    )
-
-    ema_f = ta.trend.ema_indicator(df['close'], window=ema_fast).iloc[-2]
-    ema_s = ta.trend.ema_indicator(df['close'], window=ema_slow).iloc[-2]
+    params = get_params(symbol, timeframe, direction, regime_group)
+    strategy_type = params['strategy_type']
+    ema_fast = params.get('ema_fast')
+    ema_slow = params.get('ema_slow')
+    rsi_min = params.get('rsi_min')
+    rsi_max = params.get('rsi_max')
 
     if strategy_type == 'ema_rsi':
+        ema_f = ta.trend.ema_indicator(df['close'], window=params['ema_fast']).iloc[-2]
+        ema_s = ta.trend.ema_indicator(df['close'], window=params['ema_slow']).iloc[-2]
+        
         if direction == 'SHORT':
             trend = last['close'] < ema_f and last['close'] < ema_s
-            rsi_ok = rsi_min < last['rsi'] < rsi_max
+            rsi_ok = params['rsi_min'] < last['rsi'] < params['rsi_max']
             candle = last['close'] < last['open']
             ema_cross = ema_f < ema_s
             macd_ok = last['macd'] < last['macd_signal']
@@ -125,7 +133,7 @@ def check_signal_by_type(last, prev, df, symbol, timeframe, direction, regime_gr
             return trend and rsi_ok and candle and confirmations >= 2
         else:
             trend = last['close'] > ema_f and last['close'] > ema_s
-            rsi_ok = rsi_min < last['rsi'] < rsi_max
+            rsi_ok = params['rsi_min'] < last['rsi'] < params['rsi_max']
             candle = last['close'] > last['open']
             ema_cross = ema_f > ema_s
             macd_ok = last['macd'] > last['macd_signal']
@@ -135,42 +143,62 @@ def check_signal_by_type(last, prev, df, symbol, timeframe, direction, regime_gr
             return trend and rsi_ok and candle and confirmations >= 2
 
     elif strategy_type == 'macd_cross':
+        ema_s = ta.trend.ema_indicator(df['close'], window=params['ema_slow']).iloc[-2]
         if direction == 'SHORT':
             return (prev['macd'] > prev['macd_signal'] and
                     last['macd'] < last['macd_signal'] and
                     last['close'] < ema_s and
-                    rsi_min < last['rsi'] < rsi_max)
+                    params['rsi_min'] < last['rsi'] < params['rsi_max'])
         else:
             return (prev['macd'] < prev['macd_signal'] and
                     last['macd'] > last['macd_signal'] and
                     last['close'] > ema_s and
-                    rsi_min < last['rsi'] < rsi_max)
+                    params['rsi_min'] < last['rsi'] < params['rsi_max'])
 
     elif strategy_type == 'bb_bounce':
+        bb_window = params.get('bb_window') or 20
+        bb_std = params.get('bb_std') or 2.0
+        bb = ta.volatility.BollingerBands(df['close'], window=bb_window, window_dev=bb_std)
+        bb_upper = bb.bollinger_hband().iloc[-2]
+        bb_lower = bb.bollinger_lband().iloc[-2]
+        
         if direction == 'SHORT':
-            return (last['close'] > last['bb_upper'] and
-                    last['rsi'] > rsi_min and
+            return (last['close'] > bb_upper and
+                    last['rsi'] > params['rsi_min'] and
                     last['close'] < last['open'])
         else:
-            return (last['close'] < last['bb_lower'] and
-                    last['rsi'] < rsi_max and
+            return (last['close'] < bb_lower and
+                    last['rsi'] < params['rsi_max'] and
                     last['close'] > last['open'])
 
     elif strategy_type == 'wavetrend_bounce':
-        dot_level = 45
-        wt1_last = df['wt1'].iloc[-2]
-        wt2_last = df['wt2'].iloc[-2]
-        wt1_prev = df['wt1'].iloc[-3]
-        wt2_prev = df['wt2'].iloc[-3]
+        wt_channel = params.get('wt_channel_len') or 10
+        wt_average = params.get('wt_average_len') or 21
+        dot_level = params.get('wt_dot_level') or 45
+        
+        # Обчислюємо WaveTrend динамічно з урахуванням унікальних періодів з бази даних!
+        ap = (df['high'] + df['low'] + df['close']) / 3.0
+        esa = ta.trend.ema_indicator(ap, window=wt_channel)
+        d = ta.trend.ema_indicator(abs(ap - esa), window=wt_channel)
+        d_val = d.copy()
+        d_val[d_val == 0] = 0.000001
+        ci = (ap - esa) / (0.015 * d_val)
+        wt1_series = ta.trend.ema_indicator(ci, window=wt_average)
+        wt2_series = wt1_series.rolling(window=4).mean()
+        
+        wt1_last = wt1_series.iloc[-2]
+        wt2_last = wt2_series.iloc[-2]
+        wt1_prev = wt1_series.iloc[-3]
+        wt2_prev = wt2_series.iloc[-3]
         
         if direction == 'SHORT':
             return (wt1_prev > wt2_prev and 
-                    last['wt1'] < last['wt2'] and 
-                    last['wt1'] > dot_level)
+                    wt1_last < wt2_last and 
+                    wt1_last > dot_level)
         else:
             return (wt1_prev < wt2_prev and 
-                    last['wt1'] > last['wt2'] and 
-                    last['wt1'] < -dot_level)
+                    wt1_last > wt2_last and 
+                    wt1_last < -dot_level)
 
     elif strategy_type == 'breakout':
         high_20 = df['high'].rolling(20).max().iloc[-2]
@@ -179,43 +207,12 @@ def check_signal_by_type(last, prev, df, symbol, timeframe, direction, regime_gr
             return (prev['close'] < high_20 and
                     last['close'] > high_20 and
                     last['volume'] > last['volume_ma'] * 1.5 and
-                    last['rsi'] > rsi_min)
+                    last['rsi'] > params['rsi_min'])
         else:
             return (prev['close'] > low_20 and
                     last['close'] < low_20 and
                     last['volume'] > last['volume_ma'] * 1.5 and
-                    last['rsi'] < rsi_max)
-
-    elif strategy_type == 'vol_spike':
-        if direction == 'SHORT':
-            return (last['volume'] > last['volume_ma'] * 3 and
-                    last['close'] < last['open'] and
-                    last['rsi'] > rsi_min)
-        else:
-            return (last['volume'] > last['volume_ma'] * 3 and
-                    last['close'] > last['open'] and
-                    last['rsi'] < rsi_max)
-
-    elif strategy_type == 'mean_reversion':
-        atr = last['atr']
-        if direction == 'SHORT':
-            return (last['close'] > last['bb_upper'] + atr * 0.5 and
-                    last['rsi'] > rsi_min)
-        else:
-            return (last['close'] < last['bb_lower'] - atr * 0.5 and
-                    last['rsi'] < rsi_max)
-
-    elif strategy_type == 'rsi_div':
-        if direction == 'SHORT':
-            return (last['close'] > prev['close'] and
-                    last['rsi'] < prev['rsi'] and
-                    last['close'] > ema_s and
-                    last['rsi'] > rsi_min)
-        else:
-            return (last['close'] < prev['close'] and
-                    last['rsi'] > prev['rsi'] and
-                    last['close'] < ema_s and
-                    last['rsi'] < rsi_max)
+                    last['rsi'] < params['rsi_max'])
 
     return False
 
@@ -412,7 +409,12 @@ async def find_signal(symbol, timeframe, scan_logs=None, btc_df=None):
     if direction is None:
         return None
 
-    ema_fast, ema_slow, rsi_min, rsi_max, strategy_type = get_params(symbol, timeframe, direction, regime_group)
+    params = get_params(symbol, timeframe, direction, regime_group)
+    strategy_type = params['strategy_type']
+    ema_fast = params.get('ema_fast')
+    ema_slow = params.get('ema_slow')
+    rsi_min = params.get('rsi_min')
+    rsi_max = params.get('rsi_max')
 
     is_scalp_strategy = strategy_type in ['wavetrend_bounce', 'bb_bounce', 'mean_reversion']
     is_scalp_tf = timeframe in ['5m', '15m', '30m', '1h']
