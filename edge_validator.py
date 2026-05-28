@@ -15,15 +15,15 @@ class QuantitativeEdgeValidator:
         df_out_of_sample = df.iloc[split_idx:].copy()
         return df_in_sample, df_out_of_sample
 
-    def evaluate_edge(self, trades: list) -> dict:
+    def evaluate_edge(self, trades: list, min_trades: int = 15) -> dict:
         """
         Аналізує вибірку угод за допомогою класичної квантової статистики.
-        Розраховує математичне сподівання (Expectancy) та t-статистику.
+        Розраховує математичне сподівання (Expectancy) та t-статистику з динамічним лімітом угод.
         """
-        if len(trades) < 15:
+        if len(trades) < min_trades:
             return {
                 "is_valid_edge": False,
-                "reason": f"Недостатній статистичний розмір вибірки (всього {len(trades)} угод, потрібно мін. 30)",
+                "reason": f"Недостатній статистичний розмір вибірки (всього {len(trades)} угод, потрібно мін. {min_trades})",
                 "expectancy_pct": 0.0,
                 "t_stat": 0.0,
                 "profit_factor": 0.0,
@@ -56,9 +56,6 @@ class QuantitativeEdgeValidator:
         sortino_ratio = (mean_pnl / downside_std) * np.sqrt(252) if downside_std > 0 else 0.0
 
         # Критерії підтвердження реальної статистичної переваги (Edge)
-        # 1. t-stat > 1.96 (Рівень значущості p < 0.05, тобто результат не випадковий)
-        # 2. Expectancy > 0.15% за одну угоду (перекриває приховане прослизання)
-        # 3. Profit Factor > 1.35
         is_valid_edge = (t_stat >= 1.96) and (mean_pnl > 0.15) and (profit_factor >= 1.35)
 
         return {
