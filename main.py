@@ -998,10 +998,15 @@ async def reconcile_historical_gap(bot, signal, active_signals):
 # SIGNAL MONITORING
 # ─────────────────────────────────────────────
 
+# На початку функції monitor_signal у main.py:
+
 async def monitor_signal(bot, signal, active_signals):
     symbol = signal['symbol']
     direction = signal['direction']
     tps = signal['tps']
+    
+    # Визначаємо сторону виходу на самому початку функції для захисту від NameError
+    exit_side = "sell" if direction == "LONG" else "buy"
     
     hit_tps = set(signal.get('hit_tps', []))
     chart_message_id = signal['chart_message_id']
@@ -1342,12 +1347,19 @@ async def monitor_signal(bot, signal, active_signals):
             elapsed = elapsed_str()
             print(f"✅ {symbol} досягнуто TP: {hit_tps}")
 
-# Переведення стопу в БУ при першому тейку
+               # Оновлення стоп-лоссу в БУ на самій біржі
+
             if 0 in hit_tps and not breakeven:
                 breakeven = True
                 signal['show_dobar'] = False
                 
-                # ДИНАМІЧНИЙ РОЗРАХУНОК РЕАЛЬНОГО БЕЗУБИТКУ (Виправлено БУ для Dobar)
+                # Визначаємо ціну беззбитку
+                use_dobar_setting = get_setting('use_dobar')
+                if use_dobar_setting is None:
+                    use_dobar_setting = True
+                    
+                dobar_filled_state = bool(signal.get('dobar_filled_state', False))
+                
                 if use_dobar_setting and dobar_filled_state and signal.get('dobar_low') is not None and signal.get('dobar_high') is not None:
                     dobar_mid = (signal['dobar_low'] + signal['dobar_high']) / 2.0
                     avg_entry = (entry + dobar_mid) / 2.0
@@ -1356,90 +1368,53 @@ async def monitor_signal(bot, signal, active_signals):
                     
                 signal['stop_loss'] = avg_entry
                 
-                # Оновлення стоп-лоссу в БУ на самій біржі (ЧЕРЕЗ ПОВНУ ПЕРЕБУДОВУ СІТКИ GRID RESET З ЗАТРИМКОЮ)
+                # Переведення стопу в БУ на самій біржі (БЕЗ скасування ліміток Take-Profit!)
                 if get_setting('trading_enabled'):
                     async_ex = None
                     try:
                         async_ex = await get_auth_exchange_client()
                         ccxt_futures_symbol = resolve_ccxt_futures_symbol(async_ex, symbol)
+                        symbol_clean = symbol.replace('/', '')
                         
-                        # 1. Повністю скасовуємо всі ордери по монеті на біржі за допомогою нашого універсального хелпера
-                        await cancel_all_exchange_orders_for_symbol(async_ex, symbol, ccxt_futures_symbol)
+                        # 1. Скасовуємо ТІЛЬКИ старий Stop-Loss ордер
+                        old_sl_id = signal.get('stop_loss_id')
+                        if old_sl_id:
+                            try:
+                                await async_ex.cancel_order(old_sl_id, ccxt_futures_symbol)
+                                print(f"🧹 [BREAKEVEN] Скасовано старий Stop-Loss (ID: {old_sl_id}) для {symbol}")
+                            except Exception:
+                                pass
                         
-                        # Надійно вичікуємо зачистку ордерів двигуном біржі (запобігає Race Condition)
-                        await asyncio.sleep(1.5)
+                        # 2. Отримуємо актуальний поточний об'єм позиції на біржі
+                        active_qty = await get_active_position_qty(async_ex, symbol_clean, ccxt_futures_symbol)
                         
-                        # 2. Виставляємо новий на рівні БУ (як STOP_MARKET з reduceOnly та ЧІТКИМ ФАКТИЧНИМ ОБ'ЄМОМ)
-                        sl_volume = float(async_ex.amount_to_precision(ccxt_futures_symbol, active_qty))
-                        
-                        sl_price_str = async_ex.price_to_precision(ccxt_futures_symbol, avg_entry)
-                        sl_params = {
-                            'stopPrice': float(sl_price_str),
-                            'reduceOnly': True
-                        }
-                        new_sl_order = await async_ex.create_order(
-                            symbol=ccxt_futures_symbol,
-                            type='STOP_MARKET',
-                            side=exit_side,
-                            amount=sl_volume,  # Передаємо фактичний об'єм позиції на біржі!
-                            params=sl_params
-                        )
-                        signal['stop_loss_id'] = new_sl_order["id"]
-                        
-# 3. Виставляємо залишкові Take-Profit лімітки (Пропорційний нелінійний розподіл)
-                        # Оскільки TP1 вже закрився (50% об'єму), залишковий об'єм на біржі становить 50%.
-                        # Нам потрібно перевиставити TP2 (20%), TP3 (15%), TP4 (15%).
-                        # Їхні частки в залишковій позиції: 40% (для TP2), 30% (для TP3), 30% (для TP4)
-                        original_percentages = [0.50, 0.20, 0.15, 0.15]
-                        remaining_pct_sum = sum(original_percentages[i] for i in range(4) if i not in hit_tps)
-                        if remaining_pct_sum <= 0:
-                            remaining_pct_sum = 0.25
+                        if active_qty > 0:
+                            sl_volume = float(async_ex.amount_to_precision(ccxt_futures_symbol, active_qty))
+                            sl_price_str = async_ex.price_to_precision(ccxt_futures_symbol, avg_entry)
                             
-                        new_tp_ids = []
-                        accumulated_vol = 0.0
-                        tp_counter = 0
-                        remaining_tps_count = 4 - len(hit_tps)
-                        
-                        for idx, (tp_price, _, _) in enumerate(tps[:4]):
-                            if idx in hit_tps:
-                                continue # Пропускаємо вже взяті цілі
-                                
-                            share = original_percentages[idx] / remaining_pct_sum
-                            current_tp_vol = float(async_ex.amount_to_precision(ccxt_futures_symbol, active_starting_volume * share))
-                            
-                            if tp_counter == remaining_tps_count - 1:
-                                current_tp_vol = float(async_ex.amount_to_precision(
-                                    ccxt_futures_symbol, active_starting_volume - accumulated_vol
-                                ))
-                            if current_tp_vol <= 0:
-                                continue
-                                
-                            accumulated_vol += current_tp_vol
-                            tp_price_str = async_ex.price_to_precision(ccxt_futures_symbol, tp_price)
-                            logger.info(f"🎯 Перевиставлення TP{idx+1} (частка {share*100:.0f}%) на {current_tp_vol} за ціною {tp_price_str}")
-                            tp_order = await async_ex.create_order(
+                            sl_params = {
+                                'stopPrice': float(sl_price_str),
+                                'reduceOnly': True
+                            }
+                            # Виставляємо новий Stop-Loss на ціні входу (БУ) під фактичний об'єм
+                            new_sl_order = await async_ex.create_order(
                                 symbol=ccxt_futures_symbol,
-                                type='limit',
+                                type='STOP_MARKET',
                                 side=exit_side,
-                                amount=current_tp_vol,
-                                price=float(tp_price_str),
-                                params={'reduceOnly': True}
+                                amount=sl_volume,
+                                params=sl_params
                             )
-                            new_tp_ids.append(tp_order["id"])
-                            tp_counter += 1
-                        
-                        signal['tp_order_ids'] = new_tp_ids
-                        
-                        print(f"🔄 Стоп-лосс на біржі успішно переведено в безубиток для {symbol} (впроваджено Grid Reset та Dobar-Cancel)")
+                            signal['stop_loss_id'] = new_sl_order["id"]
+                            print(f"🔄 [BREAKEVEN] Stop-Loss успішно переведено в безубиток (BE) на об'єм {sl_volume} для {symbol}")
+                        else:
+                            print(f"⚠️ [BREAKEVEN] Позицію по {symbol} вже закрито на біржі, виставляти БУ стоп не потрібно.")
+                            
                     except Exception as sl_be_err:
-                        print(f"Помилка переведення стопу в БУ на біржі для {symbol}: {sl_be_err}")
-                    finally:
-                                            pass
+                        print(f"❌ Помилка переведення стопу в БУ на біржі для {symbol}: {sl_be_err}")
                 else:
                     signal['stop_loss'] = entry
                 
                 save_active_signals(active_signals)
-                print(f"🔄 {symbol} стоп переведено в БУ: {signal['stop_loss']}")
 
             new_text = format_signal(
                 symbol, signal['timeframe'], direction,
