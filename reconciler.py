@@ -132,7 +132,6 @@ class ReconciliationWorker:
                         market = async_ex.market(ccxt_futures_symbol)
                         symbol_id = market['id'] # наприклад, XMRUSDT
                         
-                        # ВИПРАВЛЕНО: Передаємо обов'язковий параметр {'symbol': symbol_id} для Binance!
                         raw_algo_orders = await async_ex.fapiPrivateGetOpenAlgoOrders({'symbol': symbol_id})
                         
                         sl_orders_on_exchange = [
@@ -142,7 +141,8 @@ class ReconciliationWorker:
                                 'type': o.get('algoType')
                             }
                             for o in raw_algo_orders
-                            if o.get('algoType') in ['STOP_MARKET', 'STOP']
+                            # Оновлено: шукаємо тип CONDITIONAL, який повертає Binance Futures
+                            if o.get('algoType') == 'CONDITIONAL'
                         ]
                     else:
                         # Для інших бірж (MEXC) використовуємо стандартний fetch_open_orders
