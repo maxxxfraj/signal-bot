@@ -353,13 +353,14 @@ def optimize_symbol_wf(symbol, timeframe, df):
                             df_is_ind, strategy_type, direction, stop_mult, tp1_mult, rsi_min=rsi_min, rsi_max=rsi_max
                         )
                         
-                        if len(is_trades) < 8: # Пом'якшено до 8 угод для боковика!
+                        # Консервативний ліміт для боковика (12 угод на In-Sample)
+                        if len(is_trades) < 12: 
                             continue
                         
                         is_pnl_array = np.array([t['net_pnl'] for t in is_trades])
                         is_mean = np.mean(is_pnl_array)
                         
-                        if is_mean <= 0.08: # Пом'якшено до 0.08% для боковика!
+                        if is_mean <= 0.08: 
                             continue
 
                         df_oos_ind = calculate_indicators(df_oos, strategy_type, bb_window=bb_window, bb_std=bb_std)
@@ -367,7 +368,8 @@ def optimize_symbol_wf(symbol, timeframe, df):
                             df_oos_ind, strategy_type, direction, stop_mult, tp1_mult, rsi_min=rsi_min, rsi_max=rsi_max
                         )
 
-                        edge_results = validator.evaluate_edge(oos_trades)
+                        # Консервативний ліміт для боковика (6 угод на Out-of-Sample)
+                        edge_results = validator.evaluate_edge(oos_trades, min_trades=6)
                         
                         is_valid_reversion = (
                             edge_results["t_stat"] >= 1.5 and 
@@ -400,7 +402,8 @@ def optimize_symbol_wf(symbol, timeframe, df):
                         df_is_ind, strategy_type, direction, stop_mult, tp1_mult, wt_dot_level=wt_dot
                     )
                     
-                    if len(is_trades) < 8:
+                    # Консервативний ліміт для боковика (12 угод на In-Sample)
+                    if len(is_trades) < 12:
                         continue
                     
                     is_pnl_array = np.array([t['net_pnl'] for t in is_trades])
@@ -414,7 +417,8 @@ def optimize_symbol_wf(symbol, timeframe, df):
                         df_oos_ind, strategy_type, direction, stop_mult, tp1_mult, wt_dot_level=wt_dot
                     )
 
-                    edge_results = validator.evaluate_edge(oos_trades)
+                    # Консервативний ліміт для боковика (6 угод на Out-of-Sample)
+                    edge_results = validator.evaluate_edge(oos_trades, min_trades=6)
                     
                     is_valid_reversion = (
                         edge_results["t_stat"] >= 1.5 and 

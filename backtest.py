@@ -297,7 +297,10 @@ def run_backtest(df, direction, ema_fast=20, ema_slow=50, rsi_min=32, rsi_max=60
             })
 
         # Розраховуємо квантову метрику Edge на Out-of-Sample вибірці
-        edge_metrics = validator.evaluate_edge(trades)
+        reversion_strategies = ['bb_bounce', 'wavetrend_bounce', 'mean_reversion']
+        min_trades_oos = 6 if strategy_type in reversion_strategies else 15
+
+        edge_metrics = validator.evaluate_edge(trades, min_trades=min_trades_oos)
 
         if not edge_metrics["is_valid_edge"]:
             return default_stats()
