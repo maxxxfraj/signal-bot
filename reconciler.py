@@ -129,10 +129,11 @@ class ReconciliationWorker:
                 try:
                     # Адаптивне зчитування умовних ордерів (STOP_MARKET)
                     if 'binance' in async_ex.id.lower():
-                        # Для Binance Futures робимо прямий запит до Algo-ендпоінту
-                        raw_algo_orders = await async_ex.fapiPrivateGetOpenAlgoOrders()
                         market = async_ex.market(ccxt_futures_symbol)
                         symbol_id = market['id'] # наприклад, XMRUSDT
+                        
+                        # ВИПРАВЛЕНО: Передаємо обов'язковий параметр {'symbol': symbol_id} для Binance!
+                        raw_algo_orders = await async_ex.fapiPrivateGetOpenAlgoOrders({'symbol': symbol_id})
                         
                         sl_orders_on_exchange = [
                             {
@@ -141,7 +142,7 @@ class ReconciliationWorker:
                                 'type': o.get('algoType')
                             }
                             for o in raw_algo_orders
-                            if o.get('symbol') == symbol_id and o.get('algoType') in ['STOP_MARKET', 'STOP']
+                            if o.get('algoType') in ['STOP_MARKET', 'STOP']
                         ]
                     else:
                         # Для інших бірж (MEXC) використовуємо стандартний fetch_open_orders
@@ -173,13 +174,20 @@ class ReconciliationWorker:
                             await self._create_new_sl_order(async_ex, ccxt_futures_symbol, signal, actual_qty_rounded)
                             
                     elif len(sl_orders_on_exchange) > 1 or len(sl_orders_on_exchange) == 0:
-                        # Аномалія: або дубльовані стопи (як у твоєму випадку), або стоп взагалі злетів!
+                        # Аномалія: або дубльовані стопи (як у твоему випадку), або стоп взагалі злетів!
                         logger.warning(f"🚨 [RECONCILER] Збій стопів для {symbol}! Знайдено {len(sl_orders_on_exchange)} STOP_MARKET ордерів. Запуск авто-лікування...")
                         
                         # 1. Повністю видаляємо всі STOP_MARKET ордери по монеті на біржі для очищення аномалії
                         for sl_order in sl_orders_on_exchange:
                             try:
-                                await async_ex.cancel_order(sl_order['id'], ccxt_futures_symbol)
+                                # Використовуємо пряме видалення Algo-ордерів
+                                if 'binance' in async_ex.id.lower():
+                                    await async_ex.fapiPrivateDeleteAlgoOrder({
+                                        'symbol': symbol_id,
+                                        'algoId': sl_order['id']
+                                    })
+                                else:
+                                    await async_ex.cancel_order(sl_order['id'], ccxt_futures_symbol)
                                 logger.info(f"🧹 [RECONCILER] Скасовано зайвий Stop-Loss (ID: {sl_order['id']})")
                             except Exception as cancel_err:
                                 logger.error(f"⚠️ [RECONCILER] Не вдалося скасувати старий Stop-Loss (ID: {sl_order['id']}): {cancel_err}")
