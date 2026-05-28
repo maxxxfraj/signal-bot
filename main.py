@@ -1854,13 +1854,15 @@ async def scan_and_send(bot, active_signals, timeframes, scan_logs=None):
 # TELEGRAM UPDATE HANDLER
 # ─────────────────────────────────────────────
 
+# Оновлена та збалансована клавіатура у файлі main.py:
+
 def main_reply_keyboard():
     """Створює постійне нижнє Reply-меню для зручної навігації"""
     keyboard = [
         [KeyboardButton("🔍 Сканувати зараз"), KeyboardButton("📊 Статистика")],
-        [KeyboardButton("⏳ Активні сигнали"), KeyboardButton("💵 Стан ринку")],
-        [KeyboardButton("📈  Аналітика виконання"), KeyboardButton("⚙️ Налаштування")],
-        [KeyboardButton("ℹ️ Про бота")]
+        [KeyboardButton("⏳ Активні сигнали"), KeyboardButton("🔄 Звірити з біржею")],
+        [KeyboardButton("📊 Стан ринку"), KeyboardButton("⚙️ Налаштування")],
+        [KeyboardButton("📈  Аналітика виконання"), KeyboardButton("ℹ️ Про бота")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
 
@@ -1994,19 +1996,40 @@ async def handle_updates(bot, active_signals):
                                     parse_mode='HTML'
                                 )
 
+                    # 1. ОБРОБКА КНОПКИ "⏳ Активні сигнали" (Швидкий показ з локальної БД)
                     elif text == '⏳ Активні сигнали' or text == '/active':
                         if not active_signals:
-                            await bot.send_message(chat_id=chat_id, text="⏳ Активних сигналів немає")
+                            await bot.send_message(chat_id=chat_id, text="⏳ Активних сигналів немає в локальній базі бота.")
                             continue
-                            
-                        await bot.send_message(chat_id=chat_id, text="⏳ Зчитую реальний стан позицій та PnL з біржі...")
                         
+                        lines = ["⏳ <b>АКТИВНІ СИГНАЛИ В БАЗІ БОТА:</b>\n"]
+                        for s in active_signals:
+                            lines.append(
+                                f"{s.get('tier','🟢')} <b>#{s['symbol']}</b> "
+                                f"({s['timeframe']}) | <b>{s['direction']}</b>\n"
+                                f"  💵 Вхід (БД): <b>{s['entry']}</b> | Stop-Loss: <b>{s.get('stop_loss')}</b>"
+                            )
+                        msg = "\n".join(lines)
+                        await bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
+
+
+                    # 2. ОБРОБКА КНОПКИ "🔄 Звірити з біржею" (Глибока звірка та PnL)
+                    elif text == '🔄 Звірити з біржею' or text == '/sync':
+                        await bot.send_message(chat_id=chat_id, text="🔄 Запущено примусову звірку позицій з біржею та коригування Stop-Loss...")
+                        
+                        # Викликаємо твою нову логіку реконсиліатора
+                        try:
+                            if 'reconciler' in globals() and reconciler is not None:
+                                await reconciler.reconcile()
+                        except Exception as rec_err:
+                            print(f"Помилка примусової реконсиліації: {rec_err}")
+                            
+                        await asyncio.sleep(1.0) # Даємо базі оновитися
+                        
+                        # Виводимо інформацію про реальні позиції та плаваючий PnL
                         async_ex = None
                         try:
-                            # Використовуємо наш Singleton-клієнт
                             async_ex = await get_auth_exchange_client()
-                            
-                            # Завантажуємо реальні відкриті позиції з біржі
                             positions_data = await async_ex.fetch_positions()
                             exchange_positions = {}
                             for pos in positions_data:
@@ -2019,10 +2042,14 @@ async def handle_updates(bot, active_signals):
                                         'currentPrice': float(pos.get('markPrice', 0.0)),
                                         'unrealizedPnl': float(pos.get('unrealizedPnl', 0.0)),
                                         'side': pos.get('side', '').upper(),
-                                        'percentage': float(pos.get('percentage', 0.0)) # % прибутку від CCXT
+                                        'percentage': float(pos.get('percentage', 0.0))
                                     }
                             
-                            lines = ["⏳ <b>АКТИВНІ СИГНАЛИ ТА РЕАЛЬНИЙ PnL З БІРЖІ:</b>\n"]
+                            if not exchange_positions:
+                                await bot.send_message(chat_id=chat_id, text="✅ <b>На біржі немає відкритих позицій.</b>", parse_mode='HTML')
+                                continue
+                                
+                            lines = ["⏳ <b>АКТУАЛЬНИЙ СТАН ПОЗИЦІЙ НА БІРЖІ (LIVE PnL):</b>\n"]
                             for s in active_signals:
                                 symbol = s['symbol']
                                 symbol_clean = symbol.replace('/', '')
@@ -2036,8 +2063,6 @@ async def handle_updates(bot, active_signals):
                                     pnl_usd = ex_pos['unrealizedPnl']
                                     pnl_pct = ex_pos['percentage']
                                     cur_price = ex_pos['currentPrice']
-                                    
-                                    # Колір та емодзі для відображення PnL
                                     pnl_emoji = "🟢" if pnl_usd >= 0 else "🔴"
                                     sign = "+" if pnl_usd >= 0 else ""
                                     
@@ -2045,31 +2070,20 @@ async def handle_updates(bot, active_signals):
                                         f"{tier} <b>#{symbol_clean}</b> ({timeframe}) | <b>{direction}</b>\n"
                                         f"  💵 Вхід (БД): <b>{entry}</b> | Біржа: <b>{ex_pos['entryPrice']:.4f}</b>\n"
                                         f"  📈 Поточна ціна: <b>{cur_price:.4f}</b> | Об'єм: <b>{ex_pos['contracts']} {symbol_clean[:-4]}</b>\n"
-                                        f"  {pnl_emoji} <b>PnL: {sign}${pnl_usd:.2f} ({sign}{pnl_pct:.2f}%)</b>\n"
+                                        f"  {pnl_emoji} <b>Unrealized PnL: {sign}${pnl_usd:.2f} ({sign}{pnl_pct:.2f}%)</b>\n"
                                     )
                                 else:
-                                    # Трейд є в пам'яті бота, але на біржі позиції немає (чистий інформаційний режим)
                                     lines.append(
                                         f"{tier} <b>#{symbol_clean}</b> ({timeframe}) | <b>{direction}</b>\n"
                                         f"  💵 Вхід (БД): <b>{entry}</b>\n"
                                         f"  ℹ️ <i>Віртуальний моніторинг (немає активної позиції на біржі)</i>\n"
                                     )
                             
-                            msg = "\n".join(lines)
-                            await bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
+                            await bot.send_message(chat_id=chat_id, text="\n".join(lines), parse_mode='HTML')
                             
                         except Exception as e:
-                            print(f"Помилка отримання PnL для активних сигналів: {e}")
-                            # Безпечний фолбек на простий текст у разі тимчасових збоїв з'єднання
-                            lines = ["⏳ <b>Активні сигнали (Помилка запиту PnL):</b>\n"]
-                            for s in active_signals:
-                                lines.append(
-                                    f"{s.get('tier','🟢')} #{s['symbol']} "
-                                    f"{s['timeframe']} {s['direction']} | "
-                                    f"Entry: {s['entry']}"
-                                )
-                            msg = "\n".join(lines)
-                            await bot.send_message(chat_id=chat_id, text=msg)
+                            print(f"Помилка виведення позицій з біржі: {e}")
+                            await bot.send_message(chat_id=chat_id, text="❌ Помилка зчитування інформації про позиції з біржі.")
 
                     elif text == '⚙️ Налаштування' or text == '/settings':
                         await bot.send_message(

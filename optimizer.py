@@ -359,7 +359,14 @@ def optimize_symbol_wf(symbol, timeframe, df):
 
                     edge_results = validator.evaluate_edge(oos_trades)
 
-                    if edge_results["is_valid_edge"] and edge_results["t_stat"] > best_reversion_score:
+                    # Пом'якшені умови валідації виключно для реверсивних стратегій боковика
+                    is_valid_reversion = (
+                        edge_results["t_stat"] >= 1.5 and 
+                        edge_results["expectancy_pct"] >= 0.08 and 
+                        edge_results["profit_factor"] >= 1.20
+                    )
+
+                    if is_valid_reversion and edge_results["t_stat"] > best_reversion_score:
                         best_reversion_score = edge_results["t_stat"]
                         best_reversion_params = {
                             'direction': direction,
@@ -371,7 +378,6 @@ def optimize_symbol_wf(symbol, timeframe, df):
                             'score': float(edge_results["t_stat"]),
                             'strategy_type': strategy_type
                         }
-
         if best_reversion_params:
             saved_configs.append(best_reversion_params)
 

@@ -339,12 +339,14 @@ async def find_signal(symbol, timeframe, scan_logs=None, btc_df=None):
 
     exchange_name = get_setting('exchange_name') or 'binance'
     limit = 1000
-    
+
     if exchange_name == 'binance':
         if timeframe == '5m':
-            limit = 6000
+            limit = 1000  # Зменшено з 6000 для обходу банів IP
         elif timeframe == '15m':
-            limit = 4000
+            limit = 1000  # Зменшено з 4000 для обходу банів IP
+        else:
+            limit = 1000
     else:
         limit = 1000
 
@@ -362,7 +364,6 @@ async def find_signal(symbol, timeframe, scan_logs=None, btc_df=None):
     regime_filter = get_setting('regime_filter_enabled')
     if regime_filter is None:
         regime_filter = True
-        
     if regime_filter:
         try:
             # Використовуємо стабільний класифікатор
