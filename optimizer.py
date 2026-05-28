@@ -262,9 +262,6 @@ def optimize_symbol_wf(symbol, timeframe, df):
     
     saved_configs = []
 
-    stop_mult = get_setting('stop_atr_mult') or 2.0
-    tp1_mult = get_setting('tp1_atr_mult') or 0.8
-
     for direction in ['LONG', 'SHORT']:
         rsi_min_opts = RSI_MIN_SHORT if direction == 'SHORT' else RSI_MIN_LONG
         rsi_max_opts = RSI_MAX_SHORT if direction == 'SHORT' else RSI_MAX_LONG
@@ -272,6 +269,10 @@ def optimize_symbol_wf(symbol, timeframe, df):
         # 1. ОПТИМІЗАЦІЯ ЯДРА А (TREND ENGINE)
         best_trend_score = -999.0
         best_trend_params = None
+
+        # Трендові мультиплікатори з налаштувань
+        stop_mult = get_setting('stop_atr_mult') or 2.0
+        tp1_mult = get_setting('tp1_atr_mult') or 0.8
 
         for strategy_type in trend_strategies:
             for ema_fast, ema_slow in product(EMA_FAST_OPTIONS, EMA_SLOW_OPTIONS):
@@ -325,6 +326,10 @@ def optimize_symbol_wf(symbol, timeframe, df):
         # 2. ОПТИМІЗАЦІЯ ЯДРА Б (REVERSION ENGINE)
         best_reversion_score = -999.0
         best_reversion_params = None
+
+        # Жорсткі контртрендові мультиплікатори для роботи в боковику
+        stop_mult = 1.0
+        tp1_mult = 1.2
 
         for strategy_type in reversion_strategies:
             for ema_fast, ema_slow in product(EMA_FAST_OPTIONS, EMA_SLOW_OPTIONS):

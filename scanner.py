@@ -420,13 +420,41 @@ async def find_signal(symbol, timeframe, scan_logs=None, btc_df=None):
 
     # Розрахунок цін для телеметрії
     entry = round(price, 6)
-    stop_mult = get_setting('stop_atr_mult') or 2.0
-    tp1_mult = get_setting('tp1_atr_mult') or 0.8
+
+    # Адаптивний підбір мультиплікаторів залежно від фази ринку
+    if regime_group == "REVERSION":
+        # Симетричні короткі стопи для боковика
+        stop_mult = 1.0
+        tp1_mult = 1.2
+    else:
+        # Широкі трендові стопи з меню налаштувань
+        stop_mult = get_setting('stop_atr_mult') or 2.0
+        tp1_mult = get_setting('tp1_atr_mult') or 0.8
 
     if direction == 'SHORT':
         stop_loss = round(entry + atr * stop_mult, 6)
     else:
         stop_loss = round(entry - atr * stop_mult, 6)
+
+    # Розрахунок зон Dobar та цілей Take-Profit
+    if direction == 'SHORT':
+        dobar_low = round(entry + atr * 0.5, 6)
+        dobar_high = round(entry + atr * 1.5, 6)
+        tps = [
+            (round(entry - atr * tp1_mult, 6), 90, round(atr * tp1_mult / entry * 100, 1)),
+            (round(entry - atr * (tp1_mult + 0.5), 6), 75, round(atr * (tp1_mult + 0.5) / entry * 100, 1)),
+            (round(entry - atr * (tp1_mult + 1.2), 6), 58, round(atr * (tp1_mult + 1.2) / entry * 100, 1)),
+            (round(entry - atr * (tp1_mult + 2.2), 6), 40, round(atr * (tp1_mult + 2.2) / entry * 100, 1)),
+        ]
+    else:
+        dobar_low = round(entry - atr * 1.5, 6)
+        dobar_high = round(entry - atr * 0.5, 6)
+        tps = [
+            (round(entry + atr * tp1_mult, 6), 90, round(atr * tp1_mult / entry * 100, 1)),
+            (round(entry + atr * (tp1_mult + 0.5), 6), 75, round(atr * (tp1_mult + 0.5) / entry * 100, 1)),
+            (round(entry + atr * (tp1_mult + 1.2), 6), 58, round(atr * (tp1_mult + 1.2) / entry * 100, 1)),
+            (round(entry + atr * (tp1_mult + 2.2), 6), 40, round(atr * (tp1_mult + 2.2) / entry * 100, 1)),
+        ]
 
     # --- КРОК 4: ФІЛЬТРАЦІЯ (З ОДНОЧАСНИМ ЛОГУВАННЯМ У ТЕЛЕМЕТРІЮ) ---
     
@@ -473,7 +501,7 @@ async def find_signal(symbol, timeframe, scan_logs=None, btc_df=None):
         )
         return None
 
-    # Розрахунок зон Dobar та цілей Take-Profit
+    # Розрахунок зон Dobar та цілей Take-Profit (повторно з урахуванням нових tp1_mult)
     if direction == 'SHORT':
         dobar_low = round(entry + atr * 0.5, 6)
         dobar_high = round(entry + atr * 1.5, 6)
