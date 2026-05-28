@@ -1861,7 +1861,7 @@ def main_reply_keyboard():
     keyboard = [
         [KeyboardButton("🔍 Сканувати зараз"), KeyboardButton("📊 Статистика")],
         [KeyboardButton("⏳ Активні сигнали"), KeyboardButton("🔄 Звірити з біржею")],
-        [KeyboardButton("📊 Стан ринку"), KeyboardButton("⚙️ Налаштування")],
+        [KeyboardButton("💵 Стан ринку"), KeyboardButton("⚙️ Налаштування")],
         [KeyboardButton("📈  Аналітика виконання"), KeyboardButton("ℹ️ Про бота")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
