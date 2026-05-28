@@ -715,9 +715,9 @@ async def reconcile_active_signals_state(bot, active_signals):
             else:
                 new_dobar_id = None
                     
-# --- ВІДНОВЛЕННЯ 3: TAKE-PROFIT (З НЕЛІНІЙНИМ РОЗПОДІЛОМ 50/20/15/15) ---
-                new_tp_ids = []
-                tps = signal.get('tps', [])
+            # --- ВІДНОВЛЕННЯ 3: TAKE-PROFIT (З НЕЛІНІЙНИМ РОЗПОДІЛОМ 50/20/15/15) ---
+            new_tp_ids = []
+            tps = signal.get('tps', [])
                 
                 remaining_tps_count = 4 - len(hit_tps)
                 if remaining_tps_count > 0:

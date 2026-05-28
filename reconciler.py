@@ -127,20 +127,40 @@ class ReconciliationWorker:
                 actual_qty_rounded = float(async_ex.amount_to_precision(ccxt_futures_symbol, actual_contracts))
                 
                 try:
-                    open_orders = await async_ex.fetch_open_orders(ccxt_futures_symbol)
-                    
-                    # Відфільтровуємо строго умовні ордери Stop-Loss
-                    sl_orders_on_exchange = [
-                        o for o in open_orders 
-                        if o.get('type', '').upper() in ['STOP_MARKET', 'STOP']
-                    ]
+                    # Адаптивне зчитування умовних ордерів (STOP_MARKET)
+                    if 'binance' in async_ex.id.lower():
+                        # Для Binance Futures робимо прямий запит до Algo-ендпоінту
+                        raw_algo_orders = await async_ex.fapiPrivateGetOpenAlgoOrders()
+                        market = async_ex.market(ccxt_futures_symbol)
+                        symbol_id = market['id'] # наприклад, XMRUSDT
+                        
+                        sl_orders_on_exchange = [
+                            {
+                                'id': o.get('algoId'),
+                                'amount': float(o.get('quantity', 0.0)),
+                                'type': o.get('algoType')
+                            }
+                            for o in raw_algo_orders
+                            if o.get('symbol') == symbol_id and o.get('algoType') in ['STOP_MARKET', 'STOP']
+                        ]
+                    else:
+                        # Для інших бірж (MEXC) використовуємо стандартний fetch_open_orders
+                        open_orders = await async_ex.fetch_open_orders(ccxt_futures_symbol)
+                        sl_orders_on_exchange = [
+                            {
+                                'id': o.get('id'),
+                                'amount': float(o.get('amount', 0.0)),
+                                'type': o.get('type')
+                            }
+                            for o in open_orders 
+                            if o.get('type', '').upper() in ['STOP_MARKET', 'STOP']
+                        ]
                     
                     # ПЕРЕВІРКА ТА АВТО-ЛІКУВАННЯ (Self-Healing)
                     if len(sl_orders_on_exchange) == 1:
                         # На біржі рівно один стоп — це ідеальний стан! Перевіряємо його об'єм
                         sl_order = sl_orders_on_exchange[0]
-                        sl_order_amount = float(sl_order.get('amount', 0.0))
-                        sl_order_amount_rounded = float(async_ex.amount_to_precision(ccxt_futures_symbol, sl_order_amount))
+                        sl_order_amount_rounded = float(async_ex.amount_to_precision(ccxt_futures_symbol, sl_order['amount']))
                         
                         # Якщо об'єм позиції змінився, коригуємо цей єдиний стоп
                         if actual_qty_rounded != sl_order_amount_rounded:
@@ -153,15 +173,16 @@ class ReconciliationWorker:
                             await self._create_new_sl_order(async_ex, ccxt_futures_symbol, signal, actual_qty_rounded)
                             
                     elif len(sl_orders_on_exchange) > 1 or len(sl_orders_on_exchange) == 0:
-                        # Аномалія: або дубльовані стопи (як зараз у тебе), або стоп взагалі злетів!
+                        # Аномалія: або дубльовані стопи (як у твоєму випадку), або стоп взагалі злетів!
                         logger.warning(f"🚨 [RECONCILER] Збій стопів для {symbol}! Знайдено {len(sl_orders_on_exchange)} STOP_MARKET ордерів. Запуск авто-лікування...")
                         
                         # 1. Повністю видаляємо всі STOP_MARKET ордери по монеті на біржі для очищення аномалії
                         for sl_order in sl_orders_on_exchange:
                             try:
                                 await async_ex.cancel_order(sl_order['id'], ccxt_futures_symbol)
-                            except Exception:
-                                pass
+                                logger.info(f"🧹 [RECONCILER] Скасовано зайвий Stop-Loss (ID: {sl_order['id']})")
+                            except Exception as cancel_err:
+                                logger.error(f"⚠️ [RECONCILER] Не вдалося скасувати старий Stop-Loss (ID: {sl_order['id']}): {cancel_err}")
                         
                         # 2. Виставляємо один чистий, правильний Stop-Loss строго під поточний об'єм позиції!
                         await self._create_new_sl_order(async_ex, ccxt_futures_symbol, signal, actual_qty_rounded)
