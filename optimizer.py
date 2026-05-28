@@ -49,15 +49,32 @@ def map_symbol_to_futures(symbol: str) -> str:
     return f"{symbol}:USDT" if not symbol.endswith(":USDT") else symbol
 
 
-def get_candles_extended(symbol, timeframe, target=10000):
-    """Збирає глибоку історію з ф'ючерсів Binance з захистом від шторму ініціалізації"""
-    # Додаємо мікро-затримку (Jitter), щоб рівномірно розподілити запити 12 ядер до Binance
-    time.sleep(random.uniform(0.1, 2.5))
+_worker_exchange = None
+
+def _get_worker_exchange():
+    global _worker_exchange
+    if _worker_exchange is None:
+        # Створюємо один клієнт на весь життєвий цикл процесу-воркера
+        _worker_exchange = ccxt.binanceusdm({
+            'enableRateLimit': True,
+            'options': {'defaultType': 'swap'}
+        })
+        # Попередньо завантажуємо ринки ОДИН раз для цього процесу
+        try:
+            _worker_exchange.load_markets()
+        except Exception as e:
+            print(f"⚠️ Попередження завантаження специфікацій ринків у воркері: {e}")
+    return _worker_exchange
+
+
+def get_candles_extended(symbol, timeframe, target=20000):
+    """Збирає глибоку історію, використовуючи кешований клієнт процесу-воркера"""
+    # Додаємо мікро-затримку (Jitter), щоб рівномірно розподілити запуск 12 процесів
+    time.sleep(random.uniform(0.1, 1.5))
     
-    # Мепимо мем-коїни під ф'ючерсні тикери
     ccxt_futures_symbol = map_symbol_to_futures(symbol)
+    exchange = _get_worker_exchange() # Зчитуємо вже ініціалізований клієнт для цього ядра!
     
-    exchange = ccxt.binanceusdm({'enableRateLimit': True})
     limit_per_request = 1000
     all_ohlcv = []
     since = None
@@ -79,10 +96,12 @@ def get_candles_extended(symbol, timeframe, target=10000):
                 all_ohlcv = ohlcv + all_ohlcv
 
             since = ohlcv[0][0] - (ohlcv[1][0] - ohlcv[0][0])
-            time.sleep(0.1)
+            time.sleep(0.25)
 
         except Exception as e:
             print(f"    Помилка завантаження історії {ccxt_futures_symbol} {timeframe}: {e}")
+            # Робимо паузу при мережевому збої
+            time.sleep(1.0)
             break
 
     if not all_ohlcv:
@@ -474,7 +493,7 @@ def save_strategy_config_to_db_with_retry(symbol, timeframe, direction, regime_g
 def worker_task(args):
     symbol, timeframe = args
     try:
-        df = get_candles_extended(symbol, timeframe, target=8000)
+        df = get_candles_extended(symbol, timeframe, target=20000)
         if df is None or len(df) < 500:
             return symbol, timeframe, None
         
