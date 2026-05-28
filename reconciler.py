@@ -97,7 +97,7 @@ class ReconciliationWorker:
                 symbol = signal['symbol']
                 symbol_clean = symbol.replace('/', '')
                 timeframe = signal['timeframe']
-                ccxt_futures_symbol = resolve_ccxt_futures_symbol(async_ex, symbol)
+                ccxt_futures_symbol = self.resolve_ccxt_futures_symbol(async_ex, symbol)
 
                 ex_pos = exchange_positions.get(symbol_clean)
 
