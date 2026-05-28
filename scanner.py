@@ -671,45 +671,47 @@ async def scan_all(timeframes=None, scan_logs=None):
         timeframes = get_setting('active_timeframes')
 
     watchlist = get_setting('watchlist')
-
-    btc_candles_map = {}
-    for tf in timeframes:
-        try:
-            limit = 6000 if tf == '5m' else (4000 if tf == '15m' else 1000)
-            btc_df = await get_candles('BTC/USDT', tf, limit=limit)
-            if btc_df is not None and len(btc_df) >= 50:
-                btc_candles_map[tf] = btc_df
-        except Exception as e:
-            print(f"Помилка завантаження глобального кешу BTC для {tf}: {e}")
-
-    sem = asyncio.Semaphore(3)
-
-    async def sem_find_signal(symbol, timeframe):
-        async with sem:
-            await asyncio.sleep(0.2)
-            btc_df = btc_candles_map.get(timeframe)
-            return await find_signal(symbol, timeframe, scan_logs=scan_logs, btc_df=btc_df)
-
-    tasks = [
-        sem_find_signal(symbol, timeframe)
-        for symbol in watchlist
-        for timeframe in timeframes
-    ]
-
-    results = await asyncio.gather(
-        *tasks,
-        return_exceptions=True
-    )
-
     signals = []
 
-    for result in results:
-        if isinstance(result, Exception):
-            print(f"Scan error: {result}")
-            continue
+    # Зменшуємо паралельність до 2 запитів одночасно для захисту лімітів спільного IP
+    sem = asyncio.Semaphore(2)
 
-        if result:
-            signals.append(result)
+    async def sem_find_signal(symbol, timeframe, btc_df):
+        async with sem:
+            # Збільшуємо паузу до 0.5с для плавної та м'якої подачі запитів на Binance
+            await asyncio.sleep(0.5)
+            return await find_signal(symbol, timeframe, scan_logs=scan_logs, btc_df=btc_df)
+
+    # Скануємо таймфрейми послідовно, а не все разом! Це згладжує навантаження на API
+    for tf in timeframes:
+        try:
+            # Кешуємо BTC для цього таймфрейму один раз перед скануванням альткоїнів
+            limit = 1000
+            btc_df = await get_candles('BTC/USDT', tf, limit=limit)
+            if btc_df is None or len(btc_df) < 50:
+                btc_df = None
+        except Exception as e:
+            print(f"Помилка завантаження кешу BTC для {tf}: {e}")
+            btc_df = None
+
+        print(f"🔍 [SCAN] Запуск сканування таймфрейму {tf} для {len(watchlist)} активів...")
+        
+        tasks = [
+            sem_find_signal(symbol, tf, btc_df)
+            for symbol in watchlist
+        ]
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for result in results:
+            if isinstance(result, Exception):
+                print(f"Scan error inside {tf}: {result}")
+                continue
+            if result:
+                signals.append(result)
+
+        # Робимо паузу у 2.5 секунди між таймфреймами, щоб дати IP-адресі на Render відпочити
+        await asyncio.sleep(2.5)
 
     return signals
 
