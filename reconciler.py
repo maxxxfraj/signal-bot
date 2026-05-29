@@ -58,13 +58,17 @@ class ReconciliationWorker:
             positions_data = await async_ex.fetch_positions()
             exchange_positions = {}
             for pos in positions_data:
-                contracts = abs(float(pos.get('contracts', 0.0)))
+                # КАСКАДНИЙ ПАРСЕР ОБ'ЄМУ ДЛЯ ПОВНОЇ СУМІСНОСТІ З БУДЬ-ЯКИМИ ВЕРСІЯМИ CCXT!
+                raw_qty = pos.get('contracts') or pos.get('positionAmt') or pos.get('size') or pos.get('info', {}).get('positionAmt', 0.0)
+                contracts = abs(float(raw_qty or 0.0))
+                
                 if contracts > 0:
-                    symbol_clean = pos.get('symbol', '').replace('/', '').split(':')[0]
+                    symbol_ccxt = pos.get('symbol', '')
+                    symbol_clean = symbol_ccxt.replace('/', '').split(':')[0]
                     exchange_positions[symbol_clean] = {
                         'contracts': contracts,
-                        'side': pos.get('side', '').upper(),
-                        'symbol_ccxt': pos.get('symbol')
+                        'side': pos.get('side', pos.get('info', {}).get('positionSide', '')).upper(),
+                        'symbol_ccxt': symbol_ccxt
                     }
 
             # 2. Отримуємо копію активних сигналів з пам'яті
@@ -120,14 +124,26 @@ class ReconciliationWorker:
                                  f"🧹 Усі залишкові лімітні Take-Profit та Stop-Loss ордери повністю зачищені з біржі.",
                             parse_mode='HTML'
                         )
+                    else:
+                        # Віртуальний або застарілий збійний сигнал просто видаляємо
+                        async with self.active_signals_lock:
+                            remove_active_signal(symbol, timeframe)
+                            if signal in self.active_signals:
+                                self.active_signals.remove(signal)
+                            self.active_monitors.pop((symbol, timeframe), None)
                     continue
 
                 # Ситуація 2: Позиція відкрита. Проводимо живий аудит ціни STOP_MARKET ордера на біржі
                 expected_contracts = float(signal.get('pos_contracts', 0.0))
                 expected_qty_rounded = float(async_ex.amount_to_precision(ccxt_futures_symbol, expected_contracts))
                 
-                # Очікувана ціна стопу (вона автоматично зміниться у сигналі при переході в БУ)
-                expected_sl_price = float(signal.get('stop_loss', 0.0))
+                # Очікувана ціна стопу
+                expected_sl_price = float(signal.get('stop_loss') or 0.0)
+                
+                # ЗАХИСНИЙ ЗАПОБІЖНИК: якщо ціна стопу в базі 0 або відсутня — не перевіряємо, щоб уникнути крашів CCXT
+                if expected_sl_price <= 0:
+                    logger.warning(f"⚠️ [RECONCILER] Для {symbol} очікувана ціна стопу відсутня в базі. Пропускаємо.")
+                    continue
                 
                 try:
                     # Адаптивне зчитування умовних ордерів (STOP_MARKET)
@@ -142,7 +158,8 @@ class ReconciliationWorker:
                                 'id': o.get('algoId'),
                                 'amount': float(o.get('quantity', 0.0)),
                                 'type': o.get('algoType'),
-                                'stop_price': float(o.get('stopPrice', 0.0)) # Зчитуємо ціну активації стопу!
+                                # ВИПРАВЛЕНО: зчитуємо правильне поле 'triggerPrice' від Binance!
+                                'stop_price': float(o.get('triggerPrice') or o.get('stopPrice', 0.0))
                             }
                             for o in raw_algo_orders
                             if o.get('algoType') == 'CONDITIONAL'
@@ -155,7 +172,6 @@ class ReconciliationWorker:
                                 'id': o.get('id'),
                                 'amount': float(o.get('amount', 0.0)),
                                 'type': o.get('type'),
-                                # Зчитує і stopPrice, і triggerPrice для повної сумісності з MEXC!
                                 'stop_price': float(o.get('stopPrice', o.get('triggerPrice', 0.0)))
                             }
                             for o in open_orders 
@@ -168,11 +184,15 @@ class ReconciliationWorker:
                         sl_order = sl_orders_on_exchange[0]
                         sl_order_price = sl_order['stop_price']
                         
-                        # ВИПРАВЛЕНО: Округляємо обидві ціни до кроку біржі перед порівнянням, щоб усунути float-похибку!
+                        # ЗАПОБІЖНИК: якщо ціна на біржі 0, пропускаємо
+                        if sl_order_price <= 0:
+                            continue
+                            
+                        # Округляємо обидві ціни до кроку біржі перед порівнянням, щоб усунути float-похибку!
                         sl_order_price_rounded = float(async_ex.price_to_precision(ccxt_futures_symbol, sl_order_price))
                         expected_sl_price_rounded = float(async_ex.price_to_precision(ccxt_futures_symbol, expected_sl_price))
                         
-                        # Якщо округлені ціни дійсно відрізняються (наприклад, переведено в БУ в коді)
+                        # Якщо ціна активації змінилася (наприклад, переведено в БУ в коді, але не встигло оновитися на біржі)
                         if sl_order_price_rounded != expected_sl_price_rounded:
                             logger.info(f"🩹 [RECONCILER] Ціна стопу змінилася з {sl_order_price_rounded} до {expected_sl_price_rounded} (перехід у БУ). Оновлюємо ордер...")
                             try:
