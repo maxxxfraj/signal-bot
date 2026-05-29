@@ -1,7 +1,7 @@
 # reconciler.py
 import asyncio
 import logging
-from database import remove_active_signal, get_connection
+from database import remove_active_signal, get_connection, close_signal_stat
 from settings import get_setting
 
 logger = logging.getLogger("TradingBot.Reconciler")
@@ -63,12 +63,11 @@ class ReconciliationWorker:
                 contracts = abs(float(raw_qty or 0.0))
                 
                 if contracts > 0:
-                    symbol_ccxt = pos.get('symbol', '')
-                    symbol_clean = symbol_ccxt.replace('/', '').split(':')[0]
+                    symbol_clean = pos.get('symbol', '').replace('/', '').split(':')[0]
                     exchange_positions[symbol_clean] = {
                         'contracts': contracts,
                         'side': pos.get('side', pos.get('info', {}).get('positionSide', '')).upper(),
-                        'symbol_ccxt': symbol_ccxt
+                        'symbol_ccxt': pos.get('symbol')
                     }
 
             # 2. Отримуємо копію активних сигналів з пам'яті
@@ -112,16 +111,36 @@ class ReconciliationWorker:
                         logger.warning(f"🧹 Позиція {symbol} закрита на біржі. Очищення ліміток...")
                         await self.cancel_all_exchange_orders_for_symbol(async_ex, symbol_clean, ccxt_futures_symbol)
                         
+                        # === РОЗРАХУНОК ФІНАНСОВОГО ЗВІТУ ПРИ ПРИМИРЕННІ (LIVE CLOSE REPORT) ===
+                        hit_tps = set(signal.get('hit_tps', []))
+                        entry = signal['entry']
+                        
+                        if 0 in hit_tps:
+                            result = 'be'
+                            pct = 0.0 # Закрито в безубиток
+                            status_display = "БЕЗЗБИТОК (BE) ↩️"
+                        else:
+                            result = 'sl'
+                            sl_price = signal.get('stop_loss') or entry
+                            pct = -round(abs(sl_price - entry) / entry * 100, 1)
+                            status_display = "STOP-LOSS 🛑"
+                            
+                        # Закриваємо статистику в базі даних та отримуємо чистий PnL у USD
+                        pnl_usd = close_signal_stat(signal.get('stat_id'), result, pct)
+                        
                         async with self.active_signals_lock:
                             remove_active_signal(symbol, timeframe)
                             if signal in self.active_signals:
                                 self.active_signals.remove(signal)
                             self.active_monitors.pop((symbol, timeframe), None)
                             
+                        # Надсилаємо детальний фінансовий звіт з PnL у Telegram!
                         await self.bot.send_message(
                             chat_id=self.chat_id,
-                            text=f"🏁 <b>Позицію по #{symbol} ({timeframe}) успішно закрито!</b>\n\n"
-                                 f"🧹 Усі залишкові лімітні Take-Profit та Stop-Loss ордери повністю зачищені з біржі.",
+                            text=f"🏁 <b>Угоду по #{symbol_clean} ({timeframe}) успішно примирено!</b>\n\n"
+                                 f"📉 Позицію було закрито на біржі по <b>{status_display}</b>.\n"
+                                 f"💰 Фінансовий результат: <b>{'+' if pnl_usd >= 0 else ''}${pnl_usd:.2f} ({pct:+.1f}%)</b>\n\n"
+                                 f"🧹 Усі залишкові лімітки та стопи автоматично зачищені.",
                             parse_mode='HTML'
                         )
                     else:
@@ -140,7 +159,7 @@ class ReconciliationWorker:
                 # Очікувана ціна стопу
                 expected_sl_price = float(signal.get('stop_loss') or 0.0)
                 
-                # ЗАХИСНИЙ ЗАПОБІЖНИК: якщо ціна стопу в базі 0 або відсутня — не перевіряємо, щоб уникнути крашів CCXT
+                # ЗАХИСНИЙ ЗАПОБІЖНИК: якщо ціна стопу в базі 0 або відсутня — не перевіряємо
                 if expected_sl_price <= 0:
                     logger.warning(f"⚠️ [RECONCILER] Для {symbol} очікувана ціна стопу відсутня в базі. Пропускаємо.")
                     continue
@@ -149,7 +168,7 @@ class ReconciliationWorker:
                     # Адаптивне зчитування умовних ордерів (STOP_MARKET)
                     if 'binance' in async_ex.id.lower():
                         market = async_ex.market(ccxt_futures_symbol)
-                        symbol_id = market['id'] # наприклад, XMRUSDT / BCHUSDT
+                        symbol_id = market['id']
                         
                         raw_algo_orders = await async_ex.fapiPrivateGetOpenAlgoOrders({'symbol': symbol_id})
                         
@@ -158,14 +177,12 @@ class ReconciliationWorker:
                                 'id': o.get('algoId'),
                                 'amount': float(o.get('quantity', 0.0)),
                                 'type': o.get('algoType'),
-                                # ВИПРАВЛЕНО: зчитуємо правильне поле 'triggerPrice' від Binance!
                                 'stop_price': float(o.get('triggerPrice') or o.get('stopPrice', 0.0))
                             }
                             for o in raw_algo_orders
                             if o.get('algoType') == 'CONDITIONAL'
                         ]
                     else:
-                        # Для інших бірж (MEXC) використовуємо стандартний fetch_open_orders
                         open_orders = await async_ex.fetch_open_orders(ccxt_futures_symbol)
                         sl_orders_on_exchange = [
                             {
@@ -180,11 +197,10 @@ class ReconciliationWorker:
                     
                     # ПЕРЕВІРКА ТА АВТО-ЛІКУВАННЯ (Self-Healing за ціною стопу)
                     if len(sl_orders_on_exchange) == 1:
-                        # На біржі рівно один стоп — це ідеальний стан! Перевіряємо його ЦІНУ активації
+                        # На біржі рівно один стоп. Перевіряємо його ЦІНУ активації
                         sl_order = sl_orders_on_exchange[0]
                         sl_order_price = sl_order['stop_price']
                         
-                        # ЗАПОБІЖНИК: якщо ціна на біржі 0, пропускаємо
                         if sl_order_price <= 0:
                             continue
                             
@@ -192,7 +208,7 @@ class ReconciliationWorker:
                         sl_order_price_rounded = float(async_ex.price_to_precision(ccxt_futures_symbol, sl_order_price))
                         expected_sl_price_rounded = float(async_ex.price_to_precision(ccxt_futures_symbol, expected_sl_price))
                         
-                        # Якщо ціна активації змінилася (наприклад, переведено в БУ в коді, але не встигло оновитися на біржі)
+                        # Якщо ціна активації змінилася
                         if sl_order_price_rounded != expected_sl_price_rounded:
                             logger.info(f"🩹 [RECONCILER] Ціна стопу змінилася з {sl_order_price_rounded} до {expected_sl_price_rounded} (перехід у БУ). Оновлюємо ордер...")
                             try:
@@ -207,7 +223,6 @@ class ReconciliationWorker:
                             except Exception as e:
                                 logger.warning(f"⚠️ Не вдалося видалити застарілий Stop-Loss {sl_order['id']}: {e}")
                                 
-                            # Виставляємо новий стоп-лосс на ПОВНИЙ об'єм (100%) за правильною ціною БУ!
                             await self._create_new_sl_order(async_ex, ccxt_futures_symbol, signal, expected_qty_rounded)
                             
                     elif len(sl_orders_on_exchange) > 1 or len(sl_orders_on_exchange) == 0:

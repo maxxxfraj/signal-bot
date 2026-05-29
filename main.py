@@ -998,6 +998,8 @@ async def reconcile_historical_gap(bot, signal, active_signals):
 # SIGNAL MONITORING
 # ─────────────────────────────────────────────
 
+# 🟢 ПОВНІСТЮ ЗАМІНИ ТІЛО ФУНКЦІЇ monitor_signal У main.py ЦИМ КОДОМ:
+
 async def monitor_signal(bot, signal, active_signals):
     symbol = signal['symbol']
     direction = signal['direction']
@@ -1115,99 +1117,18 @@ async def monitor_signal(bot, signal, active_signals):
             sl_hit = (direction == 'SHORT' and price >= stop_loss) or \
                      (direction == 'LONG' and price <= stop_loss)
             if sl_hit:
-                elapsed = elapsed_str()
-                total_profit = 0.0
-                tp_summary_lines = []
-                for i in sorted(hit_tps):
-                    tp_pct_i = tps[i][2]
-                    total_profit += tp_pct_i
-                    tp_summary_lines.append(f"✅ TP{i+1}: {tps[i][0]} | +{tp_pct_i}%")
-
-                msg_lines = [f"#{symbol} {signal['timeframe']} {'LONG 📈' if direction == 'LONG' else 'SHORT 📉'}", ""]
-                if breakeven and hit_tps:
-                    msg_lines.extend(tp_summary_lines)
-                    msg_lines.append("")
-                    pos_contracts = signal.get('pos_contracts', 0.0)
-                    maker, taker = get_fees_for_exchange()
-                    entry_fee = entry * pos_contracts * taker
-                    exit_fee = price * pos_contracts * taker
-                    avg_entry = entry
-                    if use_dobar_setting and signal.get('dobar_low') is not None and signal.get('dobar_high') is not None:
-                        dobar_mid = (signal['dobar_low'] + signal['dobar_high']) / 2.0
-                        avg_entry = (entry + dobar_mid) / 2.0
-                    gross_pnl = (price - avg_entry) * pos_contracts if direction == 'LONG' else (avg_entry - price) * pos_contracts
-                    pnl_usd = gross_pnl - (entry_fee + exit_fee)
-                    msg_lines.append(f"↩️ Сигнал закрився у беззбиток ({elapsed})")
-                    msg_lines.append(f"💰 Загальний прибуток: +{round(total_profit, 1)}% (PnL: <b>${pnl_usd:.2f}</b>)")
-                    await bot.send_message(chat_id=CHAT_ID, text="\n".join(msg_lines), reply_to_message_id=chart_message_id, parse_mode='HTML')
-                    close_signal_stat(signal.get('stat_id'), 'tp', round(total_profit, 1), price)
-                else:
-                    sl_pct = round(abs(price - entry) / entry * 100, 1)
-                    pos_contracts = signal.get('pos_contracts', 0.0)
-                    maker, taker = get_fees_for_exchange()
-                    avg_entry = entry
-                    if use_dobar_setting and signal.get('dobar_low') is not None and signal.get('dobar_high') is not None:
-                        dobar_mid = (signal['dobar_low'] + signal['dobar_high']) / 2.0
-                        avg_entry = (entry + dobar_mid) / 2.0
-                    entry_fee = avg_entry * pos_contracts * taker
-                    exit_fee = price * pos_contracts * taker
-                    gross_loss = (price - avg_entry) * pos_contracts if direction == 'LONG' else (avg_entry - price) * pos_contracts
-                    pnl_usd = gross_loss - (entry_fee + exit_fee)
-                    msg_lines.append(f"🛑 Stop-Loss спрацював ({elapsed}) | -{sl_pct}%")
-                    msg_lines.append("💸 TP не було досягнуто")
-                    msg_lines.append(f"❌ Сигнал закрився по стопу (PnL: <b>${pnl_usd:.2f}</b>)")
-                    await bot.send_message(chat_id=CHAT_ID, text="\n".join(msg_lines), reply_to_message_id=chart_message_id, parse_mode='HTML')
-                    close_signal_stat(signal.get('stat_id'), 'sl', -sl_pct, price)
-
-                if get_setting('trading_enabled'):
-                    try:
-                        async_ex = await get_auth_exchange_client()
-                        ccxt_futures_symbol = resolve_ccxt_futures_symbol(async_ex, symbol)
-                        await cancel_all_exchange_orders_for_symbol(async_ex, symbol, ccxt_futures_symbol)
-                    except Exception:
-                        pass
-                async with active_signals_lock:
-                    remove_active_signal(symbol, signal['timeframe'])
-                    active_signals.remove(signal)
-                    active_monitors.pop((symbol, signal['timeframe']), None)
-                break
+                # Повністю видалено віртуальне закриття за ціною! 
+                # Закриттям СЛ на 100% керуватиме виключно біржа та наш реконсиліатор в reconciler.py
+                pass
 
         # --- КРОК 2: Перевірка безубитку (БУ) ---
         if breakeven and 0 in hit_tps:
             be_hit = (direction == 'SHORT' and price >= entry) or \
                      (direction == 'LONG' and price <= entry)
             if be_hit:
-                elapsed = elapsed_str()
-                total_profit = sum(tps[i][2] for i in hit_tps)
-                tp_summary_lines = [f"✅ TP{i+1}: {tps[i][0]} | +{tps[i][2]}%" for i in sorted(hit_tps)]
-                msg_lines = [f"#{symbol} {signal['timeframe']} {'LONG 📈' if direction == 'LONG' else 'SHORT 📉'}", ""]
-                msg_lines.extend(tp_summary_lines)
-                msg_lines.append("")
-                pos_contracts = signal.get('pos_contracts', 0.0)
-                maker, taker = get_fees_for_exchange()
-                avg_entry = entry
-                if use_dobar_setting and signal.get('dobar_low') is not None and signal.get('dobar_high') is not None:
-                    dobar_mid = (signal['dobar_low'] + signal['dobar_high']) / 2.0
-                    avg_entry = (entry + dobar_mid) / 2.0
-                entry_fee = avg_entry * pos_contracts * taker
-                exit_fee = price * pos_contracts * taker
-                gross_pnl = (price - avg_entry) * pos_contracts if direction == 'LONG' else (avg_entry - price) * pos_contracts
-                pnl_usd = gross_pnl - (entry_fee + exit_fee)
-                msg_lines.append(f"↩️ Сигнал закрився у беззбиток ({elapsed})")
-                msg_lines.append(f"💰 Загальний прибуток: +{round(total_profit, 1)}% (PnL: <b>${pnl_usd:.2f}</b>)")
-                await bot.send_message(chat_id=CHAT_ID, text="\n".join(msg_lines), reply_to_message_id=chart_message_id, parse_mode='HTML')
-                if get_setting('trading_enabled'):
-                    try:
-                        async_ex = await get_auth_exchange_client()
-                        ccxt_futures_symbol = resolve_ccxt_futures_symbol(async_ex, symbol)
-                        await cancel_all_exchange_orders_for_symbol(async_ex, symbol, ccxt_futures_symbol)
-                    except Exception:
-                        pass
-                close_signal_stat(signal.get('stat_id'), 'tp', round(total_profit, 1), price)
-                remove_active_signal(symbol, timeframe)
-                if signal in active_signals:
-                    active_signals.remove(signal)
-                break
+                # Повністю видалено віртуальне закриття за ціною! 
+                # Закриттям БУ на 100% керуватиме виключно біржа та наш реконсиліатор в reconciler.py
+                pass
 
         # --- КРОК 3: Перевірка Take Profit (Гібридне фізичне/віртуальне детектування) ---
         new_hits = set()
@@ -1344,42 +1265,6 @@ async def monitor_signal(bot, signal, active_signals):
                             await bot.send_message(chat_id=CHAT_ID, text=new_text, parse_mode='HTML')
                         except Exception as ex2:
                             print(f"Критична помилка відправки тексту {symbol}: {ex2}")
-
-            if len(hit_tps) == len(tps):
-                last_tp = max(hit_tps)
-                total_profit = sum(tps[i][2] for i in hit_tps)
-                tp_summary_lines = [f"✅ TP{i+1}: {tps[i][0]} | +{tps[i][2]}%" for i in sorted(hit_tps)]
-                msg_lines = [f"#{symbol} {signal['timeframe']} {'LONG 📈' if direction == 'LONG' else 'SHORT 📉'}", ""]
-                msg_lines.extend(tp_summary_lines)
-                msg_lines.append("")
-                pos_contracts = signal.get('pos_contracts', 0.0)
-                maker, taker = get_fees_for_exchange()
-                avg_entry = entry
-                if use_dobar_setting and signal.get('dobar_low', None) is not None and signal.get('dobar_high', None) is not None:
-                    dobar_mid = (signal['dobar_low'] + signal['dobar_high']) / 2.0
-                    avg_entry = (entry + dobar_mid) / 2.0
-                entry_fee = avg_entry * pos_contracts * taker
-                exit_price_tp4 = tps[3][0]
-                exit_fee = exit_price_tp4 * pos_contracts * maker
-                gross_pnl = (exit_price_tp4 - avg_entry) * pos_contracts if direction == 'LONG' else (avg_entry - exit_price_tp4) * pos_contracts
-                pnl_usd = gross_pnl - (entry_fee + exit_fee)
-                msg_lines.append(f"🎯 TP{last_tp+1}: {tps[last_tp][0]} ✅ ({elapsed_str})")
-                msg_lines.append(f"💰 Загальний прибуток: +{round(total_profit, 1)}% (<b>+${pnl_usd:.2f}</b>)")
-                msg_lines.append("🏁 Сигнал закриюто")
-                await bot.send_message(chat_id=CHAT_ID, text="\n".join(msg_lines), reply_to_message_id=chart_message_id, parse_mode='HTML')
-                if get_setting('trading_enabled'):
-                    try:
-                        async_ex = await get_auth_exchange_client()
-                        ccxt_futures_symbol = resolve_ccxt_futures_symbol(async_ex, symbol)
-                        await cancel_all_exchange_orders_for_symbol(async_ex, symbol, ccxt_futures_symbol)
-                    except Exception:
-                        pass
-                close_signal_stat(signal.get('stat_id'), 'tp', round(total_profit, 1), price)
-                async with active_signals_lock:
-                    remove_active_signal(symbol, timeframe)
-                    active_signals.remove(signal)
-                    active_monitors.pop((symbol, timeframe), None)
-                break
 
 
 # ─────────────────────────────────────────────
