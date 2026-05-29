@@ -155,7 +155,8 @@ class ReconciliationWorker:
                                 'id': o.get('id'),
                                 'amount': float(o.get('amount', 0.0)),
                                 'type': o.get('type'),
-                                'stop_price': float(o.get('stopPrice', 0.0))
+                                # Зчитує і stopPrice, і triggerPrice для повної сумісності з MEXC!
+                                'stop_price': float(o.get('stopPrice', o.get('triggerPrice', 0.0)))
                             }
                             for o in open_orders 
                             if o.get('type', '').upper() in ['STOP_MARKET', 'STOP']
@@ -167,9 +168,13 @@ class ReconciliationWorker:
                         sl_order = sl_orders_on_exchange[0]
                         sl_order_price = sl_order['stop_price']
                         
-                        # Якщо ціна активації змінилася (наприклад, переведено в БУ в коді, але не встигло оновитися на біржі)
-                        if abs(sl_order_price - expected_sl_price) > 0.0001:
-                            logger.info(f"🩹 [RECONCILER] Ціна стопу змінилася з {sl_order_price} до {expected_sl_price} (перехід у БУ). Оновлюємо ордер...")
+                        # ВИПРАВЛЕНО: Округляємо обидві ціни до кроку біржі перед порівнянням, щоб усунути float-похибку!
+                        sl_order_price_rounded = float(async_ex.price_to_precision(ccxt_futures_symbol, sl_order_price))
+                        expected_sl_price_rounded = float(async_ex.price_to_precision(ccxt_futures_symbol, expected_sl_price))
+                        
+                        # Якщо округлені ціни дійсно відрізняються (наприклад, переведено в БУ в коді)
+                        if sl_order_price_rounded != expected_sl_price_rounded:
+                            logger.info(f"🩹 [RECONCILER] Ціна стопу змінилася з {sl_order_price_rounded} до {expected_sl_price_rounded} (перехід у БУ). Оновлюємо ордер...")
                             try:
                                 if 'binance' in async_ex.id.lower():
                                     await async_ex.fapiPrivateDeleteAlgoOrder({
@@ -182,7 +187,7 @@ class ReconciliationWorker:
                             except Exception as e:
                                 logger.warning(f"⚠️ Не вдалося видалити застарілий Stop-Loss {sl_order['id']}: {e}")
                                 
-                            # Створюємо один чистий стоп-лосс на 100% об'єму за ціною БУ!
+                            # Виставляємо новий стоп-лосс на ПОВНИЙ об'єм (100%) за правильною ціною БУ!
                             await self._create_new_sl_order(async_ex, ccxt_futures_symbol, signal, expected_qty_rounded)
                             
                     elif len(sl_orders_on_exchange) > 1 or len(sl_orders_on_exchange) == 0:
