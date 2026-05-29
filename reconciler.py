@@ -92,7 +92,7 @@ class ReconciliationWorker:
                         except Exception as phantom_err:
                             logger.error(f"⚠️ Не вдалося закрити фантомну позицію {ex_symbol_clean}: {phantom_err}")
 
-            # --- ЕТАП Б: Покроковий аудит та самолікування захисних стопів ---
+            # --- ЕТАП Б: Покроковий аудит та самолікування захисних стопів за ЦІНОЮ ---
             for signal in local_signals_snapshot:
                 symbol = signal['symbol']
                 symbol_clean = symbol.replace('/', '')
@@ -122,15 +122,18 @@ class ReconciliationWorker:
                         )
                     continue
 
-                # Ситуація 2: Позиція відкрита. Проводимо живий аудит STOP_MARKET ордерів на біржі
-                actual_contracts = ex_pos['contracts']
-                actual_qty_rounded = float(async_ex.amount_to_precision(ccxt_futures_symbol, actual_contracts))
+                # Ситуація 2: Позиція відкрита. Проводимо живий аудит ціни STOP_MARKET ордера на біржі
+                expected_contracts = float(signal.get('pos_contracts', 0.0))
+                expected_qty_rounded = float(async_ex.amount_to_precision(ccxt_futures_symbol, expected_contracts))
+                
+                # Очікувана ціна стопу (вона автоматично зміниться у сигналі при переході в БУ)
+                expected_sl_price = float(signal.get('stop_loss', 0.0))
                 
                 try:
                     # Адаптивне зчитування умовних ордерів (STOP_MARKET)
                     if 'binance' in async_ex.id.lower():
                         market = async_ex.market(ccxt_futures_symbol)
-                        symbol_id = market['id'] # наприклад, XMRUSDT
+                        symbol_id = market['id'] # наприклад, XMRUSDT / BCHUSDT
                         
                         raw_algo_orders = await async_ex.fapiPrivateGetOpenAlgoOrders({'symbol': symbol_id})
                         
@@ -138,10 +141,10 @@ class ReconciliationWorker:
                             {
                                 'id': o.get('algoId'),
                                 'amount': float(o.get('quantity', 0.0)),
-                                'type': o.get('algoType')
+                                'type': o.get('algoType'),
+                                'stop_price': float(o.get('stopPrice', 0.0)) # Зчитуємо ціну активації стопу!
                             }
                             for o in raw_algo_orders
-                            # Оновлено: шукаємо тип CONDITIONAL, який повертає Binance Futures
                             if o.get('algoType') == 'CONDITIONAL'
                         ]
                     else:
@@ -151,36 +154,44 @@ class ReconciliationWorker:
                             {
                                 'id': o.get('id'),
                                 'amount': float(o.get('amount', 0.0)),
-                                'type': o.get('type')
+                                'type': o.get('type'),
+                                'stop_price': float(o.get('stopPrice', 0.0))
                             }
                             for o in open_orders 
                             if o.get('type', '').upper() in ['STOP_MARKET', 'STOP']
                         ]
                     
-                    # ПЕРЕВІРКА ТА АВТО-ЛІКУВАННЯ (Self-Healing)
+                    # ПЕРЕВІРКА ТА АВТО-ЛІКУВАННЯ (Self-Healing за ціною стопу)
                     if len(sl_orders_on_exchange) == 1:
-                        # На біржі рівно один стоп — це ідеальний стан! Перевіряємо його об'єм
+                        # На біржі рівно один стоп — це ідеальний стан! Перевіряємо його ЦІНУ активації
                         sl_order = sl_orders_on_exchange[0]
-                        sl_order_amount_rounded = float(async_ex.amount_to_precision(ccxt_futures_symbol, sl_order['amount']))
+                        sl_order_price = sl_order['stop_price']
                         
-                        # Якщо об'єм позиції змінився, коригуємо цей єдиний стоп
-                        if actual_qty_rounded != sl_order_amount_rounded:
-                            logger.info(f"🩹 [RECONCILER] Об'єм змінився з {sl_order_amount_rounded} до {actual_qty_rounded}. Коригуємо Stop-Loss для {symbol}...")
+                        # Якщо ціна активації змінилася (наприклад, переведено в БУ в коді, але не встигло оновитися на біржі)
+                        if abs(sl_order_price - expected_sl_price) > 0.0001:
+                            logger.info(f"🩹 [RECONCILER] Ціна стопу змінилася з {sl_order_price} до {expected_sl_price} (перехід у БУ). Оновлюємо ордер...")
                             try:
-                                await async_ex.cancel_order(sl_order['id'], ccxt_futures_symbol)
+                                if 'binance' in async_ex.id.lower():
+                                    await async_ex.fapiPrivateDeleteAlgoOrder({
+                                        'symbol': symbol_id,
+                                        'algoId': sl_order['id']
+                                    })
+                                else:
+                                    await async_ex.cancel_order(sl_order['id'], ccxt_futures_symbol)
+                                logger.info(f"🧹 [RECONCILER] Успішно скасовано застарілий Stop-Loss (ID: {sl_order['id']})")
                             except Exception as e:
-                                logger.warning(f"⚠️ Не вдалося видалити старий Stop-Loss {sl_order['id']}: {e}")
+                                logger.warning(f"⚠️ Не вдалося видалити застарілий Stop-Loss {sl_order['id']}: {e}")
                                 
-                            await self._create_new_sl_order(async_ex, ccxt_futures_symbol, signal, actual_qty_rounded)
+                            # Створюємо один чистий стоп-лосс на 100% об'єму за ціною БУ!
+                            await self._create_new_sl_order(async_ex, ccxt_futures_symbol, signal, expected_qty_rounded)
                             
                     elif len(sl_orders_on_exchange) > 1 or len(sl_orders_on_exchange) == 0:
-                        # Аномалія: або дубльовані стопи (як у твоему випадку), або стоп взагалі злетів!
+                        # Аномалія: або дубльовані стопи, або стоп взагалі злетів!
                         logger.warning(f"🚨 [RECONCILER] Збій стопів для {symbol}! Знайдено {len(sl_orders_on_exchange)} STOP_MARKET ордерів. Запуск авто-лікування...")
                         
                         # 1. Повністю видаляємо всі STOP_MARKET ордери по монеті на біржі для очищення аномалії
                         for sl_order in sl_orders_on_exchange:
                             try:
-                                # Використовуємо пряме видалення Algo-ордерів
                                 if 'binance' in async_ex.id.lower():
                                     await async_ex.fapiPrivateDeleteAlgoOrder({
                                         'symbol': symbol_id,
@@ -192,8 +203,8 @@ class ReconciliationWorker:
                             except Exception as cancel_err:
                                 logger.error(f"⚠️ [RECONCILER] Не вдалося скасувати старий Stop-Loss (ID: {sl_order['id']}): {cancel_err}")
                         
-                        # 2. Виставляємо один чистий, правильний Stop-Loss строго під поточний об'єм позиції!
-                        await self._create_new_sl_order(async_ex, ccxt_futures_symbol, signal, actual_qty_rounded)
+                        # 2. Виставляємо один чистий, правильний Stop-Loss на повний 100% об'єм!
+                        await self._create_new_sl_order(async_ex, ccxt_futures_symbol, signal, expected_qty_rounded)
                         
                         # Повідомляємо в Telegram про успішне авто-лікування дублікатів!
                         await self.bot.send_message(
@@ -201,7 +212,7 @@ class ReconciliationWorker:
                             text=f"🛡️ <b>[САМОЛІКУВАННЯ] Виправлено аномалію по #{symbol_clean}!</b>\n\n"
                                  f"⚠️ Кількість виявлених Stop-Loss на біржі становила: <b>{len(sl_orders_on_exchange)}</b>\n"
                                  f"🧹 <b>Дія:</b> Усі дублікати автоматично скасовані.\n"
-                                 f"🛑 <b>Результат:</b> Створено один чистий Stop-Loss під фактичний об'єм <b>{actual_qty_rounded} {symbol_clean[:-4]}</b>.",
+                                 f"🛑 <b>Результат:</b> Створено один чистий Stop-Loss під об'єм <b>{expected_qty_rounded} {symbol_clean[:-4]}</b>.",
                             parse_mode='HTML'
                         )
                 except Exception as audit_err:

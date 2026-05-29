@@ -1264,37 +1264,35 @@ async def monitor_signal(bot, signal, active_signals):
                         ccxt_futures_symbol = resolve_ccxt_futures_symbol(async_ex, symbol)
                         symbol_clean = symbol.replace('/', '')
                         
-                        # 1. Скасовуємо ТІЛЬКИ старий Stop-Loss ордер
+                        # 1. Скасовуємо ТІЛЬКИ старий Stop-Loss ордер за його Algo ID
                         old_sl_id = signal.get('stop_loss_id')
                         if old_sl_id:
                             try:
-                                await async_ex.cancel_order(old_sl_id, ccxt_futures_symbol)
+                                await async_ex.fapiPrivateDeleteAlgoOrder({
+                                    'symbol': symbol_clean,
+                                    'algoId': old_sl_id
+                                })
                                 print(f"🧹 [BREAKEVEN] Скасовано старий Stop-Loss (ID: {old_sl_id}) для {symbol}")
                             except Exception:
                                 pass
                         
-                        # 2. Отримуємо актуальний поточний об'єм позиції на біржі
-                        active_qty = await get_active_position_qty(async_ex, symbol_clean, ccxt_futures_symbol)
+                        # 2. Виставляємо новий Stop-Loss строго на ПОВНИЙ 100% об'єм контракту з бази даних!
+                        total_expected = float(async_ex.amount_to_precision(ccxt_futures_symbol, signal.get('pos_contracts', 0.0)))
+                        sl_price_str = async_ex.price_to_precision(ccxt_futures_symbol, avg_entry)
                         
-                        if active_qty > 0:
-                            sl_volume = float(async_ex.amount_to_precision(ccxt_futures_symbol, active_qty))
-                            sl_price_str = async_ex.price_to_precision(ccxt_futures_symbol, avg_entry)
-                            
-                            sl_params = {
-                                'stopPrice': float(sl_price_str),
-                                'reduceOnly': True
-                            }
-                            new_sl_order = await async_ex.create_order(
-                                symbol=ccxt_futures_symbol,
-                                type='STOP_MARKET',
-                                side=exit_side,
-                                amount=sl_volume,
-                                params=sl_params
-                            )
-                            signal['stop_loss_id'] = new_sl_order["id"]
-                            print(f"🔄 [BREAKEVEN] Stop-Loss переведено в безубиток (BE) на об'єм {sl_volume} для {symbol}")
-                        else:
-                            print(f"⚠️ [BREAKEVEN] Позицію по {symbol} вже закрито, виставляти БУ стоп не потрібно.")
+                        sl_params = {
+                            'stopPrice': float(sl_price_str),
+                            'reduceOnly': True
+                        }
+                        new_sl_order = await async_ex.create_order(
+                            symbol=ccxt_futures_symbol,
+                            type='STOP_MARKET',
+                            side=exit_side,
+                            amount=total_expected, # 100% об'єму!
+                            params=sl_params
+                        )
+                        signal['stop_loss_id'] = new_sl_order["id"]
+                        print(f"🔄 [BREAKEVEN] Stop-Loss переведено в безубиток (BE) на об'єм {total_expected} для {symbol}")
                     except Exception as sl_be_err:
                         print(f"❌ Помилка переведення стопу в БУ на біржі для {symbol}: {sl_be_err}")
                 else:
