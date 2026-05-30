@@ -1043,7 +1043,7 @@ async def monitor_signal(bot, signal, active_signals):
         entry = signal['entry']
         exit_side = "sell" if direction == "LONG" else "buy"
 
-        # --- ДИНАМІЧНИЙ ДЕТЕКТОР ДОБОРУ (DOBAR-SENSING) ---
+# --- ДИНАМІЧНИЙ ДЕТЕКТОР ДОБОРУ (DOBAR-SENSING) ---
         dobar_filled_state = signal.get('dobar_filled_state', False)
         use_dobar_setting = get_setting('use_dobar')
         if use_dobar_setting is None:
@@ -1055,10 +1055,10 @@ async def monitor_signal(bot, signal, active_signals):
                 # Використовуємо наш новий асинхронний клієнт
                 async_ex = await get_auth_exchange_client()
                 ccxt_futures_symbol = resolve_ccxt_futures_symbol(async_ex, symbol)
+                symbol_clean = symbol.replace('/', '')
                 
-                # Перевіряємо фактичний об'єм позиції на біржі за допомогою надійного корутина get_active_position_qty
-                active_qty = await get_active_position_qty(async_ex, symbol, ccxt_futures_symbol)
-                
+                # Перевіряємо фактичний об'єм позиції на біржі
+                active_qty = await get_active_position_qty(async_ex, symbol_clean, ccxt_futures_symbol)
                 total_expected = float(async_ex.amount_to_precision(ccxt_futures_symbol, signal.get('pos_contracts', 0.0)))
                 
                 # Якщо об'єм вирівнявся до 100% очікуваного об'єму (усереднення виконано)
@@ -1073,16 +1073,25 @@ async def monitor_signal(bot, signal, active_signals):
                         except Exception:
                             pass
                     
-                    # 2. Виставляємо нові лімітні тейки на ПОВНИЙ об'єм (100%) з reduceOnly
+                    # 2. Виставляємо нові лімітні тейки на ПОВНИЙ об'єм (100%) з нелінійним розподілом 50/20/15/15
                     new_tp_ids = []
-                    tp_step_volume = float(async_ex.amount_to_precision(ccxt_futures_symbol, total_expected / 4))
+                    percentages = [0.50, 0.20, 0.15, 0.15]
+                    accumulated_vol = 0.0
+                    
                     for idx, (tp_price, _, _) in enumerate(tps[:4]):
-                        current_tp_vol = tp_step_volume
+                        current_tp_vol = float(async_ex.amount_to_precision(ccxt_futures_symbol, total_expected * percentages[idx]))
                         if idx == 3:
-                            current_tp_vol = float(async_ex.amount_to_precision(ccxt_futures_symbol, total_expected - (tp_step_volume * 3)))
+                            # Останній тейк забирає весь залишок через округлення
+                            current_tp_vol = float(async_ex.amount_to_precision(
+                                ccxt_futures_symbol, total_expected - accumulated_vol
+                            ))
+                        
                         if current_tp_vol <= 0:
                             continue
+                            
+                        accumulated_vol += current_tp_vol
                         tp_price_str = async_ex.price_to_precision(ccxt_futures_symbol, tp_price)
+                        print(f"🎯 Оновлення: виставлення повного TP{idx+1} (нелінійний {percentages[idx]*100:.0f}%) на {current_tp_vol} за ціною {tp_price_str}")
                         tp_order = await async_ex.create_order(
                             symbol=ccxt_futures_symbol,
                             type='limit',
@@ -1104,11 +1113,12 @@ async def monitor_signal(bot, signal, active_signals):
                         text=(
                             f"↩️ <b>Добір (Dobar) виконано на біржі!</b>\n"
                             f"📦 Позицію збільшено до повного об'єму: <b>{total_expected} {symbol[:-4]}</b>\n"
-                            f"🎯 Лімітні Take-Profit ордери оновлено на повний об'єм."
+                            f"🎯 Лімітні Take-Profit ордери автоматично оновлено на повний об'єм (нелінійний розподіл 50/20/15/15)."
                         ),
                         parse_mode='HTML',
                         reply_to_message_id=chart_message_id
                     )
+                
             except Exception as dobar_err:
                 print(f"Помилка відстеження добору для {symbol}: {dobar_err}")
 
