@@ -486,10 +486,11 @@ def close_signal_stat(signal_id, result, pct, exit_price=None):
         if signal_row:
             entry = to_native_float(signal_row['entry'])
             direction = signal_row['direction']
-            pos_contracts = to_native_float(signal_row['pos_contracts']) or 0.0
+            total_expected_contracts = to_native_float(signal_row['pos_contracts']) or 0.0
             
             dobar_low = to_native_float(signal_row['dobar_low'])
             dobar_high = to_native_float(signal_row['dobar_high'])
+            dobar_filled_state = bool(signal_row.get('dobar_filled_state', 0))
             
             use_dobar = get_setting('use_dobar')
             if use_dobar is None:
@@ -498,26 +499,70 @@ def close_signal_stat(signal_id, result, pct, exit_price=None):
             actual_entry = entry
             if use_dobar and dobar_low is not None and dobar_high is not None:
                 dobar_mid = (dobar_low + dobar_high) / 2.0
-                actual_entry = (entry + dobar_mid) / 2.0
+                avg_entry = (entry + dobar_mid) / 2.0
             
-            if calculated_exit_price is None:
+            # Обчислюємо максимальний об'єм, якого реально досягла позиція (50% чи 100%)
+            filled_factor = 1.0 if (not use_dobar or dobar_filled_state) else 0.5
+            filled_volume = total_expected_contracts * filled_factor
+            
+            # Розшифровуємо взяті Тейки з бази даних
+            hit_tps_str = signal_row.get('hit_tps') or ""
+            hit_tps = set()
+            if hit_tps_str:
+                try:
+                    hit_tps = set(map(int, hit_tps_str.split(',')))
+                except ValueError:
+                    pass
+            
+            # Отримуємо ціни Тейків з бази
+            tp_prices = [
+                to_native_float(signal_row['tp1']),
+                to_native_float(signal_row['tp2']),
+                to_native_float(signal_row['tp3']),
+                to_native_float(signal_row['tp4'])
+            ]
+            
+            # Розрахунок прибутку від виконаних Тейк-Профітів
+            original_percentages = [0.50, 0.20, 0.15, 0.15]
+            total_gross_pnl_usd = 0.0
+            closed_share_sum = 0.0
+            
+            for idx in sorted(list(hit_tps)):
+                if idx < len(tp_prices) and tp_prices[idx] is not None:
+                    tp_price = tp_prices[idx]
+                    tp_contracts = filled_volume * original_percentages[idx]
+                    closed_share_sum += original_percentages[idx]
+                    
+                    if direction == 'LONG':
+                        tp_pnl = (tp_price - actual_entry) * tp_contracts
+                    else:
+                        tp_pnl = (actual_entry - tp_price) * tp_contracts
+                    total_gross_pnl_usd += tp_pnl
+
+            # Розрахунок результату для залишку позиції (який закрився по БУ або Стопу)
+            remaining_share = 1.0 - closed_share_sum
+            if remaining_share > 0:
+                remaining_contracts = filled_volume * remaining_share
+                
+                if calculated_exit_price is None:
+                    if direction == 'LONG':
+                        calculated_exit_price = actual_entry * (1 + pct / 100.0) if result == 'tp' else actual_entry * (1 - abs(pct) / 100.0)
+                    else:
+                        calculated_exit_price = actual_entry * (1 - pct / 100.0) if result == 'tp' else actual_entry * (1 + abs(pct) / 100.0)
+                
                 if direction == 'LONG':
-                    calculated_exit_price = actual_entry * (1 + pct / 100.0) if result == 'tp' else actual_entry * (1 - abs(pct) / 100.0)
+                    rem_pnl = (calculated_exit_price - actual_entry) * remaining_contracts
                 else:
-                    calculated_exit_price = actual_entry * (1 - pct / 100.0) if result == 'tp' else actual_entry * (1 + abs(pct) / 100.0)
+                    rem_pnl = (actual_entry - calculated_exit_price) * remaining_contracts
+                total_gross_pnl_usd += rem_pnl
             
+            # Розрахунок реальних комісій (Maker для ліміток ТП, Taker для входу та стопу)
             maker_fee, taker_fee = get_fees_for_exchange()
-            
-            entry_fee_usd = actual_entry * pos_contracts * taker_fee
-            exit_fee_usd = calculated_exit_price * pos_contracts * (maker_fee if result == 'tp' else taker_fee)
+            entry_fee_usd = actual_entry * filled_volume * taker_fee
+            exit_fee_usd = (calculated_exit_price or actual_entry) * filled_volume * (maker_fee if result == 'tp' else taker_fee)
             total_fees = entry_fee_usd + exit_fee_usd
             
-            if direction == 'LONG':
-                gross_pnl_usd = (calculated_exit_price - actual_entry) * pos_contracts
-            else:
-                gross_pnl_usd = (actual_entry - calculated_exit_price) * pos_contracts
-                
-            pnl_usd = gross_pnl_usd - total_fees
+            pnl_usd = total_gross_pnl_usd - total_fees
             
         cursor.execute('''
             UPDATE stats 
@@ -527,7 +572,7 @@ def close_signal_stat(signal_id, result, pct, exit_price=None):
             result, 
             to_native_float(pct), 
             to_native_float(pnl_usd), 
-            to_native_float(calculated_exit_price), 
+            to_native_float(calculated_exit_price or actual_entry), 
             datetime.now(timezone.utc).isoformat(), 
             signal_id
         ))
